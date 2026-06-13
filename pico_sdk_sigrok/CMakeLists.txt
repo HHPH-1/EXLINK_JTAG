@@ -21,6 +21,7 @@ include(pico_sdk_import.cmake)
 project(pico_sdk_sigrok C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
+option(SIGROK_BOARD_EXLINK "Build firmware for the Exlink RP2040 board" OFF)
 #See https://github.com/pico-coder/sigrok-pico/pull/63/  
 #setting this allows the DTR to be ignored.  In addition to this, the use of 
 #tud_cdc_connected should be replaced with tud_ready.
@@ -31,6 +32,12 @@ add_executable(pico_sdk_sigrok
   pico_sdk_sigrok.c
   sr_device.c
 )
+
+if(SIGROK_BOARD_EXLINK)
+    target_compile_definitions(pico_sdk_sigrok PRIVATE
+        SIGROK_BOARD_EXLINK=1
+    )
+endif()
 
 pico_enable_stdio_usb(pico_sdk_sigrok 1)
 pico_enable_stdio_uart(pico_sdk_sigrok 0)

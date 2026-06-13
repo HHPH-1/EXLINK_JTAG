@@ -237,9 +237,9 @@ int process_char(sr_device_t *d, char charin)
       //Enable/disable Analog channel   
       // format is Axyy where x is 0 for disabled, 1 for enabled and yy is channel #
       case 'A':                          
-         tmpint = d->cmdstr[1] - '0';     // extract enable value
-         tmpint2 = atoi(&(d->cmdstr[2])); // extract channel number
-         if ((tmpint >= 0) && (tmpint <= 1) && (tmpint2 >= 0) && (tmpint2 <= 31))
+          tmpint = d->cmdstr[1] - '0';     // extract enable value
+          tmpint2 = atoi(&(d->cmdstr[2])); // extract channel number
+          if ((tmpint >= 0) && (tmpint <= 1) && (tmpint2 >= 0) && (tmpint2 < NUM_A_CHAN))
          {
             d->a_mask = d->a_mask & ~(1 << tmpint2);
             d->a_mask = d->a_mask | (tmpint << tmpint2);
@@ -255,9 +255,9 @@ int process_char(sr_device_t *d, char charin)
       // format is Dxyy where x is 0 for disabled, 1 for enabled and yy is channel #
       //Note that this is a fixed number 0..N regardless of channel naming and/or pins enabled
       case 'D':                           /// enable digital channel always a set
-         tmpint = d->cmdstr[1] - '0';     // extract enable value
-         tmpint2 = atoi(&(d->cmdstr[2])); // extract channel number
-         if ((tmpint >= 0) && (tmpint <= 1) && (tmpint2 >= 0) && (tmpint2 <= 31))
+          tmpint = d->cmdstr[1] - '0';     // extract enable value
+          tmpint2 = atoi(&(d->cmdstr[2])); // extract channel number
+          if ((tmpint >= 0) && (tmpint <= 1) && (tmpint2 >= 0) && (tmpint2 < NUM_D_CHAN))
          {
             d->d_mask = d->d_mask & ~(1 << tmpint2);
             d->d_mask = d->d_mask | (tmpint << tmpint2);
@@ -285,7 +285,9 @@ int process_char(sr_device_t *d, char charin)
 //So in basemode, D0-D20 are GP2..GP22
 //in dig_26_mode D0-D22,D23-D25 are GP0..GP22,GP26..GP28
 //in dig_32_mode D0-D31 are GP0..GP31
-            #ifdef BASE_MODE //D0-20 are GP2..GP22
+            #ifdef EXLINK_MODE //D0-D7 are CHAN0-CHAN7 on GP2..GP9
+               tmpint2=tmpint+EXLINK_LA_GPIO_BASE;
+            #elif defined(BASE_MODE) //D0-20 are GP2..GP22
                tmpint2=tmpint+2;
             #elif DIG_26_MODE //D0-D22,D23-D25 are GP0..GP22,GP26..GP28
                tmpint2=(tmpint<=22) ? tmpint : tmpint+3; 
@@ -296,10 +298,16 @@ int process_char(sr_device_t *d, char charin)
             sprintf(d->rspstr, "GP%d",tmpint2);
             ret=1;            
           } else  if(d->cmdstr[1]=='A'){
+            #ifdef EXLINK_MODE
+            tmpint2=EXLINK_ADC_GPIO;
+            Dprintf("NameA %c %d %d\n\r", d->cmdstr[1],tmpint,tmpint2);
+            sprintf(d->rspstr, "ADC%d_GP%d",EXLINK_ADC_INPUT,tmpint2);
+            #else
             //ADC0/1/2 are GP26,27,28
             tmpint2=tmpint+26;
             Dprintf("NameA %c %d %d\n\r", d->cmdstr[1],tmpint,tmpint2);
             sprintf(d->rspstr, "ADC%d_GP%d",tmpint,tmpint2);
+            #endif
             ret=1;            
           } else{
             ret=0;

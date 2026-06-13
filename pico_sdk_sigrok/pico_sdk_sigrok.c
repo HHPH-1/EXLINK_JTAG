@@ -19,6 +19,11 @@
 
 #include "sr_device.h"
 
+#ifdef SIGROK_BOARD_EXLINK
+_Static_assert(PICO_FLASH_SIZE_BYTES == EXLINK_FLASH_SIZE_BYTES,
+               "Exlink RP2040 requires a 2 MB flash configuration");
+#endif
+
 //forced_test_mode is a special mode that puts the device into an active sampling
 //state out of reset.  It is used for a quick way to debug features without needed
 //pulseview or sigrok-cli to initiate a transfer.
@@ -774,7 +779,7 @@ int main(){
     Dprintf("pll_sys = %dkHz\n\r", f_pll_sys);
     uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
     Dprintf("clk_sys = %dkHz\n\r", f_clk_sys);
-    #ifndef DIG_32_MODE 
+    #ifdef HAS_SMPS_MODE
     //Set GPIO23 (TP4) to control switched mode power supply noise
     //This may reduce noise into the ADC in some use cases.   
     gpio_init_mask(1<<23);
@@ -787,7 +792,11 @@ int main(){
     //GPIOs 26 through 28 (the ADC ports) are on the PICO, GPIO29 is not a pin on the PICO
     //Note that digital only modes don't block all configuration related to ADC, but does enough
     //to ensure we can properly sample the pins digitally.
-    #ifdef BASE_MODE
+    #ifdef EXLINK_MODE
+    Dprintf("Exlink analog input: ADC3 / GPIO29\n\r");
+    adc_gpio_init(EXLINK_ADC_GPIO);
+    adc_init();
+    #elif defined(BASE_MODE)
     adc_gpio_init(26);
     adc_gpio_init(27);
     adc_gpio_init(28);
@@ -1082,10 +1091,15 @@ while(1){
              }else{ //adcdivint legal
 	              *adcdiv=((adcdivint-1)<<8)|adc_frac_int; 
                 Dprintf("adcdiv %u frac %d adcdivint %d\n\r",*adcdiv,adc_frac_int,adcdivint);
-                //This is needed to clear the AINSEL so that when the round robin arbiter starts 
-                //we start sampling on channel 0
+                #ifdef EXLINK_MODE
+                // Host A0 maps to the single physical Exlink analog input: ADC3 / GPIO29.
+                adc_select_input(EXLINK_ADC_INPUT);
+                adc_set_round_robin(EXLINK_ADC_ROUND_ROBIN_MASK);
+                #else
+                // Clear AINSEL so the baseline round-robin arbiter starts on ADC0.
                 adc_select_input(0);
                 adc_set_round_robin(dev.a_mask & 0x7);
+                #endif
                 //             en, dreq_en,dreq_thresh,err_in_fifo,byte_shift to 8 bit
                 adc_fifo_setup(true, true,   1,           false,       true);
                 //set adc0 to immediate trigger (but without adc_run it shouldn't start)
@@ -1147,8 +1161,10 @@ for faster parsing.
              // Configure state machine to loop over this `in` instruction forever,
              // with autopush enabled.
              pio_sm_config c = pio_get_default_sm_config();
-             #ifdef DIG_26_MODE
-               sm_config_set_in_pins(&c, 0); //start at GPIO0 since uart isn't used
+              #ifdef EXLINK_MODE
+                sm_config_set_in_pins(&c, EXLINK_LA_GPIO_BASE);
+              #elif defined(DIG_26_MODE)
+                sm_config_set_in_pins(&c, 0); //start at GPIO0 since uart isn't used
              #elif DIG_32_MODE
                sm_config_set_in_pins(&c, 0); //start at GPIO0 since uart isn't used
              #else 
@@ -1249,7 +1265,7 @@ for faster parsing.
           irq_set_enabled(DMA_IRQ_0, true);
           irq_set_exclusive_handler(DMA_IRQ_0, dma_int_handler);
 
-          #ifdef BASE_MODE
+          #if NUM_A_CHAN > 0
           adc_run(true); //enable free run sample mode
           #endif
           pio_sm_set_enabled(pio, piosm, true);           
@@ -1354,7 +1370,7 @@ for faster parsing.
      //forced_test_mode is really a one shot deal as there is no way to restart it.
      //Exit the mode so that host accesses will work normally
      forced_test_mode_run=false;
-     #ifdef BASE_MODE
+     #if NUM_A_CHAN > 0
      adc_run(false);
      adc_fifo_drain();
      #endif

@@ -3,6 +3,10 @@
 #include <stdint.h>
 #include <stdbool.h>
 
+#ifdef SIGROK_BOARD_EXLINK
+#include "boards/exlink_rp2040.h"
+#endif
+
 // Pin usages
 ///////////////////////////////////
 // Baseline mode -21 digital, 3 analog
@@ -27,7 +31,9 @@
 // Note: In the wireless versions, GPIO23-25 control the wifi chip, 23 and 24
 //aren't available in the PICO, and 25 controls the LED. So while the LED is lost,
 //there is no change in available channels for sampling.
+#ifndef PICO_MODE
 #define PICO_MODE 2 //0 is baseline, 1 is digital 26, 2 is digital 32
+#endif
 //WARNING: USE PIN_TEST_MODE with extreme caution!!!!
 //If set, treat the inputs (A&D) to be outputs so that the device can drive values for
 //turn-on testing.  Enabling this allows all modes to be tested without having to drive
@@ -37,8 +43,19 @@
 #undef BASE_MODE
 #undef DIG_26_MODE
 #undef DIG_32_MODE
+#undef EXLINK_MODE
 #undef HAS_LED
-#if PICO_MODE == 0 //Baseline
+#undef HAS_SMPS_MODE
+#ifdef SIGROK_BOARD_EXLINK
+  #define EXLINK_MODE 1
+  #define NUM_A_CHAN EXLINK_ADC_CHANNEL_COUNT
+  #define NUM_D_CHAN EXLINK_LA_CHANNEL_COUNT
+  #define GPIO_D_MASK EXLINK_LA_GPIO_MASK
+  #define UART_EN 0
+  #define MEM_D_MASK_L 0x000000FF
+  #define MEM_D_MASK_U 0x00000000
+  #define PIN_TEST_MASK GPIO_D_MASK
+#elif PICO_MODE == 0 //Baseline
   #define BASE_MODE 1
   #define NUM_A_CHAN 3 // number of analog channels
   #define NUM_D_CHAN 21 // number of digital channels
@@ -52,6 +69,7 @@
   #define MEM_D_MASK_U 0x0  //upper mask of bits for digital inputs
   #define PIN_TEST_MASK 0x1C7FFFFE
   #define HAS_LED 1
+  #define HAS_SMPS_MODE 1
 #elif PICO_MODE == 1  //Digital 26
   #define DIG_26_MODE 1
   #define NUM_A_CHAN 0 // number of analog channels
@@ -62,6 +80,7 @@
   #define UART_EN 0
   #define PIN_TEST_MASK 0x1C7FFFFF
   #define HAS_LED 1
+  #define HAS_SMPS_MODE 1
 //Note: The RP2040 only has GPIOs 0-29.
 //The RP2350 has GPIOs 30 and above, but only in the QFN-80 packeage.
 #elif PICO_MODE==2  //Digital 32

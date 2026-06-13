@@ -40,7 +40,7 @@ The Exlink build uses the normal Pico board definition because the flash and
 crystal match a Raspberry Pi Pico.
 
 ```powershell
-cmake -S pico_sdk_sigrok -B build/exlink -G Ninja -DPICO_BOARD=pico -DSIGROK_BOARD_EXLINK=ON
+cmake -S pico_sdk_sigrok -B build/exlink -G Ninja -DPICO_BOARD=pico -DSIGROK_BOARD_EXLINK=ON -Dpicotool_DIR=C:\Users\HHPH\Desktop\exlink_JTAG\rp2040\tools\picotool-2.1.0\picotool
 cmake --build build/exlink
 ```
 
@@ -51,8 +51,8 @@ Expected outputs:
 - `build/exlink/pico_sdk_sigrok.hex`
 - `build/exlink/pico_sdk_sigrok.uf2`
 
-The current Codex environment could not run this build because CMake, Ninja,
-the ARM embedded GCC toolchain, and `PICO_SDK_PATH` are not installed.
+This build was verified locally after installing CMake, Ninja, Arm GNU
+Toolchain, Pico SDK 2.1.0, and picotool 2.1.0.
 
 ## UF2 Flashing
 
@@ -71,12 +71,11 @@ Passed in this environment:
 
 - Source mapping inspection.
 - Exlink channel and GPIO static checks in source.
+- Baseline firmware build.
+- Exlink firmware build.
 
 Not passed in this environment:
 
-- Baseline firmware build.
-- Exlink firmware build.
 - Real UF2 flashing.
 - USB enumeration on Exlink hardware.
 - PulseView digital and analog sampling tests.
-

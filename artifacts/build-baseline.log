@@ -1,22 +1,27 @@
 Baseline build was requested before Exlink firmware changes.
 
-Result: not run in this environment.
+Result: passed after installing the RP2040 toolchain locally.
 
-Reason:
-- `cmake` is not installed or not in PATH.
-- `ninja` is not installed or not in PATH.
-- `arm-none-eabi-gcc` is not installed or not in PATH.
-- `PICO_SDK_PATH` is not set.
-- `%USERPROFILE%/.pico-sdk/cmake/pico-vscode.cmake` does not exist.
-
-The upstream source was cloned successfully, but the RP2040 toolchain is
-required before either the baseline or Exlink UF2 can be built.
+Installed/used tools:
+- CMake 4.3.3
+- Ninja 1.13.2
+- Arm GNU Toolchain 14.2.Rel1
+- Python 3.12.5
+- Raspberry Pi Pico SDK 2.1.0
+- picotool 2.1.0, from pico-sdk-tools v2.1.0-0
 
 Attempted baseline command:
-cmake -S pico_sdk_sigrok -B build\baseline -G Ninja -DPICO_BOARD=pico
+cmake -S pico_sdk_sigrok -B build\baseline -G Ninja -DPICO_BOARD=pico -Dpicotool_DIR=C:\Users\HHPH\Desktop\exlink_JTAG\rp2040\tools\picotool-2.1.0\picotool
+
+cmake --build build\baseline
 
 Attempted Exlink command:
-cmake -S pico_sdk_sigrok -B build\exlink -G Ninja -DPICO_BOARD=pico -DSIGROK_BOARD_EXLINK=ON
+cmake -S pico_sdk_sigrok -B build\exlink -G Ninja -DPICO_BOARD=pico -DSIGROK_BOARD_EXLINK=ON -Dpicotool_DIR=C:\Users\HHPH\Desktop\exlink_JTAG\rp2040\tools\picotool-2.1.0\picotool
 
-Both commands failed before configuration because PowerShell could not resolve
-the `cmake` executable.
+cmake --build build\exlink
+
+Generated baseline UF2:
+build\baseline\pico_sdk_sigrok.uf2
+
+Generated Exlink UF2:
+build\exlink\pico_sdk_sigrok.uf2

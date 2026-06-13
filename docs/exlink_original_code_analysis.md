@@ -9,9 +9,8 @@ Exlink RP2040 board.
 - The Pico SDK build should therefore use the Raspberry Pi Pico board
   definition, including the normal 2 MB flash setting, when the SDK is
   available.
-- The current environment does not have `cmake`, `ninja`, `arm-none-eabi-gcc`,
-  `PICO_SDK_PATH`, or the Raspberry Pi Pico VS Code SDK helper installed, so
-  the unmodified baseline build could not be executed here.
+- After installing the local RP2040 toolchain, the baseline-compatible build
+  completed successfully and generated `build/baseline/pico_sdk_sigrok.uf2`.
 
 ## Digital Channels
 
@@ -61,4 +60,3 @@ Exlink RP2040 board.
   out-of-range host channels.
 - `pico_sdk_sigrok/pico_sdk_sigrok.c`: initialize ADC3/GPIO29, set PIO base to
   GPIO2, and avoid Pico-only GPIO23/LED behavior in the Exlink build.
-

@@ -105,7 +105,15 @@ Output artifacts include:
 
 ## Hardware Test Commands
 
-These still need to be run on the real board and target:
+The following real-board loopback tests were run on 2026-06-14 with:
+
+- Port: `COM10`
+- Firmware identity: `EXLINK-RP2040-JTAG-BRIDGE v0.3`
+- Loopback wiring: `CHAN3 / GPIO5 / TDI -> CHAN2 / GPIO4 / TDO`
+- PIO TCK: 5 MHz
+- Maximum shift: 32768 bits
+
+Commands used:
 
 ```powershell
 python sigrok-pico\tools\exlink_jtag_test.py --port COM10 info
@@ -118,6 +126,83 @@ python sigrok-pico\tools\exlink_jtag_test.py --port COM10 boundary-test
 python sigrok-pico\tools\exlink_jtag_test.py --port COM10 benchmark
 python sigrok-pico\tools\exlink_jtag_test.py --port COM10 stress --bits 32768 --count 1000
 ```
+
+## Hardware Loopback Results
+
+Initial identity and capabilities:
+
+- `info`: `EXLINK-RP2040-JTAG-BRIDGE v0.3`
+- Active engine before testing: `pio`
+- Supported engines: `bitbang`, `pio`, `dma`
+- Maximum shift: 32768 bits
+
+Loopback validation:
+
+- `engine bitbang`: PASS
+- Bitbang `loopback --bits 128`: PASS
+- `engine pio`: PASS
+- `clock-pio --khz 5000`: PASS, actual PIO TCK 5000000 Hz
+- PIO `loopback --bits 128`: PASS
+- PIO `loopback --bits 32768`: PASS
+- PIO `boundary-test`: PASS for all listed boundary sizes from 1 to 32768 bits, with zero/one/random payloads
+
+Firmware profile was cleared after switching to PIO and setting 5 MHz. Profiling was enabled for boundary-test plus one benchmark run:
+
+- logical shifts: 722
+- successful shifts: 722
+- total bits: 6732350
+- effective firmware-profile rate: 757857 bit/s
+- DMA chunks: 3538
+- average chunks per shift: 4
+- max chunks per shift: 16
+- DMA timeouts: 0
+- PIO recoveries: 0
+- USB RX incomplete waits: 509908
+- USB TX space waits: 260634
+
+Firmware timing summary with profiling enabled:
+
+| Stage | Count | Total us | Avg us | Min us | Max us |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| request_parse_us | 722 | 2050744 | 2840 | 21 | 10597 |
+| tx_prepare_us | 722 | 2454421 | 3399 | 1 | 11950 |
+| dma_pio_us | 722 | 1373049 | 1901 | 12 | 6665 |
+| tdo_pack_us | 722 | 1617374 | 2240 | 1 | 9707 |
+| response_queue_us | 722 | 1367949 | 1894 | 26 | 7689 |
+| shift_total_us | 722 | 8883401 | 12303 | 71 | 46573 |
+
+Benchmark with profiling enabled:
+
+| Shift bits | Runs | Effective bit/s | Elapsed s |
+| ---: | ---: | ---: | ---: |
+| 128 | 100 | 318670 | 0.040 |
+| 512 | 100 | 514759 | 0.099 |
+| 4096 | 100 | 712031 | 0.575 |
+| 8192 | 100 | 721353 | 1.136 |
+| 16384 | 100 | 725169 | 2.259 |
+| 32768 | 100 | 731314 | 4.481 |
+
+Benchmark with profiling disabled:
+
+| Shift bits | Runs | Effective bit/s | Elapsed s |
+| ---: | ---: | ---: | ---: |
+| 128 | 100 | 325712 | 0.039 |
+| 512 | 100 | 514646 | 0.099 |
+| 4096 | 100 | 712333 | 0.575 |
+| 8192 | 100 | 713934 | 1.147 |
+| 16384 | 100 | 721601 | 2.271 |
+| 32768 | 100 | 728445 | 4.498 |
+
+Stress test with profiling disabled:
+
+- Command: `stress --bits 32768 --count 1000`
+- Result: PASS, 1000/1000 loopback shifts matched
+- Engine: `pio`
+- DMA: yes
+- Total bits: 32768000
+- Total time: 44.925 s
+- Effective bit/s: 729395
+- Average request latency: 44.907 ms
 
 Vivado profile run:
 
@@ -134,12 +219,11 @@ for {set i 1} {$i <= 5} {incr i} {
 
 ## Results Not Yet Available
 
-No new hardware benchmark, boundary-test, stress-test, Zynq scan, or Vivado download results have been run in this coding session.
+No new Zynq scan, Vivado download, or full XVC TCP profiling session results have been run in this coding session.
 
 The following sections must be filled after real measurements:
 
 - PC-side time distribution
-- Firmware-side time distribution
 - Shift length histogram from a real Vivado session
 - Optimization before/after comparisons
 - DMA chunk size comparison for 2048/4096/8192 bits

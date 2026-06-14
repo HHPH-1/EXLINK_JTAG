@@ -22,10 +22,45 @@ ENGINE_NAMES = {
     1: "pio",
 }
 ENGINE_VALUES = {value: key for key, value in ENGINE_NAMES.items()}
+JTAG_ENGINE_FLAG_BITBANG = 1 << 0
+JTAG_ENGINE_FLAG_PIO = 1 << 1
+JTAG_ENGINE_FLAG_DMA = 1 << 2
 
 
 class BridgeError(RuntimeError):
     pass
+
+
+class SerialTimeoutError(BridgeError):
+    pass
+
+
+def serial_read_exact(ser, length: int) -> bytes:
+    if length < 0:
+        raise ValueError("length must be non-negative")
+
+    chunks = bytearray()
+    while len(chunks) < length:
+        chunk = ser.read(length - len(chunks))
+        if not chunk:
+            raise SerialTimeoutError(f"CDC timeout: expected {length} bytes, got {len(chunks)}")
+        chunks.extend(chunk)
+    return bytes(chunks)
+
+
+def serial_write_all(ser, data: bytes) -> None:
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view):
+        try:
+            written = ser.write(view[offset:])
+        except serial.SerialTimeoutException as exc:
+            raise SerialTimeoutError(f"CDC write timeout after {offset} of {len(view)} bytes") from exc
+        if written is None:
+            written = len(view) - offset
+        if written <= 0:
+            raise SerialTimeoutError(f"CDC write timeout after {offset} of {len(view)} bytes")
+        offset += written
 
 
 class ExlinkJtagBridge:
@@ -36,13 +71,14 @@ class ExlinkJtagBridge:
         self.serial.close()
 
     def read_exact(self, length: int) -> bytes:
-        chunks = bytearray()
-        while len(chunks) < length:
-            chunk = self.serial.read(length - len(chunks))
-            if not chunk:
-                raise BridgeError(f"CDC timeout: expected {length} bytes, got {len(chunks)}")
-            chunks.extend(chunk)
-        return bytes(chunks)
+        return serial_read_exact(self.serial, length)
+
+    def write_all(self, data: bytes) -> None:
+        serial_write_all(self.serial, data)
+
+    def recover_link(self) -> None:
+        self.serial.reset_input_buffer()
+        self.serial.reset_output_buffer()
 
     def expect_error_or(self, expected_tag: bytes) -> bytes:
         tag = self.read_exact(1)
@@ -54,20 +90,20 @@ class ExlinkJtagBridge:
         return tag
 
     def info(self) -> str:
-        self.serial.write(b"I")
+        self.write_all(b"I")
         self.expect_error_or(b"i")
         length = struct.unpack("<H", self.read_exact(2))[0]
         return self.read_exact(length).decode("ascii", errors="replace")
 
     def reset_tap(self) -> None:
-        self.serial.write(b"T")
+        self.write_all(b"T")
         self.expect_error_or(b"t")
         status = self.read_exact(1)[0]
         if status != 0:
             raise BridgeError(f"TAP reset failed with status {status}")
 
     def set_clock(self, half_period_us: int) -> int:
-        self.serial.write(b"K" + struct.pack("<I", half_period_us))
+        self.write_all(b"K" + struct.pack("<I", half_period_us))
         self.expect_error_or(b"k")
         status = self.read_exact(1)[0]
         applied = struct.unpack("<I", self.read_exact(4))[0]
@@ -76,7 +112,7 @@ class ExlinkJtagBridge:
         return applied
 
     def set_pio_clock_hz(self, requested_hz: int) -> int:
-        self.serial.write(b"P" + struct.pack("<I", requested_hz))
+        self.write_all(b"P" + struct.pack("<I", requested_hz))
         self.expect_error_or(b"p")
         status = self.read_exact(1)[0]
         actual = struct.unpack("<I", self.read_exact(4))[0]
@@ -85,7 +121,7 @@ class ExlinkJtagBridge:
         return actual
 
     def capabilities(self) -> Tuple[int, int, int]:
-        self.serial.write(b"Q")
+        self.write_all(b"Q")
         self.expect_error_or(b"q")
         status = self.read_exact(1)[0]
         active = self.read_exact(1)[0]
@@ -99,7 +135,7 @@ class ExlinkJtagBridge:
         if engine not in ENGINE_VALUES:
             raise ValueError(f"unknown engine {engine!r}")
 
-        self.serial.write(b"M" + bytes([ENGINE_VALUES[engine]]))
+        self.write_all(b"M" + bytes([ENGINE_VALUES[engine]]))
         self.expect_error_or(b"m")
         status = self.read_exact(1)[0]
         active = self.read_exact(1)[0]
@@ -115,7 +151,7 @@ class ExlinkJtagBridge:
             raise ValueError("TMS/TDI payload lengths do not match bit_count")
 
         frame = b"S" + struct.pack("<I", bit_count) + tms + tdi
-        self.serial.write(frame)
+        self.write_all(frame)
         self.expect_error_or(b"s")
         status = self.read_exact(1)[0]
         returned_bits = struct.unpack("<I", self.read_exact(4))[0]
@@ -181,11 +217,11 @@ def engine_name(value: int) -> str:
 
 def supported_engine_names(flags: int) -> List[str]:
     names: List[str] = []
-    if flags & (1 << 0):
+    if flags & JTAG_ENGINE_FLAG_BITBANG:
         names.append("bitbang")
-    if flags & (1 << 1):
+    if flags & JTAG_ENGINE_FLAG_PIO:
         names.append("pio")
-    if flags & (1 << 2):
+    if flags & JTAG_ENGINE_FLAG_DMA:
         names.append("dma")
     return names
 

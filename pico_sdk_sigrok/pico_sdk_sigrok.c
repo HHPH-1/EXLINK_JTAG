@@ -792,7 +792,7 @@ int main(){
     //GPIOs 26 through 28 (the ADC ports) are on the PICO, GPIO29 is not a pin on the PICO
     //Note that digital only modes don't block all configuration related to ADC, but does enough
     //to ensure we can properly sample the pins digitally.
-    #ifdef EXLINK_MODE
+    #if defined(EXLINK_MODE) && (NUM_A_CHAN > 0)
     Dprintf("Exlink analog input: ADC3 / GPIO29\n\r");
     adc_gpio_init(EXLINK_ADC_GPIO);
     adc_init();

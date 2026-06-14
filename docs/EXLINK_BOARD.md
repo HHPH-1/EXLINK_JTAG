@@ -15,13 +15,13 @@ RP2040 hardware while keeping the existing sigrok/PulseView CDC protocol.
 | CHAN5 | GPIO7 | Digital channel 5 |
 | CHAN6 | GPIO8 | Digital channel 6 |
 | CHAN7 | GPIO9 | Digital channel 7 |
-| ADC3 | GPIO29 | Analog input |
 | PICO_DP | USB_DP | USB Device |
 | PICO_DN | USB_DM | USB Device |
 
-The firmware reports one analog channel to the host. Host analog channel A0 is
-mapped to the physical Exlink input ADC3/GPIO29. The signal name query returns
-`ADC3_GP29` so this remapping is visible to host software.
+The firmware reports eight digital channels to the host as `D0` through `D7`.
+These display names map onto the physical Exlink inputs CHAN0 through CHAN7 on
+GPIO2 through GPIO9. No analog channel is reported to the host, so PulseView
+will not show `A0`.
 
 ## Board Notes
 
@@ -63,7 +63,6 @@ Toolchain, Pico SDK 2.1.0, and picotool 2.1.0.
 5. Open a sigrok-pico compatible PulseView build.
 6. Apply test square waves to CHAN0 through CHAN7 and verify D0 through D7
    order.
-7. Apply a safe analog voltage to GPIO29/ADC3 and verify the analog reading.
 
 ## Verification Status
 
@@ -78,4 +77,4 @@ Not passed in this environment:
 
 - Real UF2 flashing.
 - USB enumeration on Exlink hardware.
-- PulseView digital and analog sampling tests.
+- PulseView digital sampling tests.

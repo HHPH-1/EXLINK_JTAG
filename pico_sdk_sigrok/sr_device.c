@@ -297,7 +297,11 @@ int process_char(sr_device_t *d, char charin)
                tmpint2=tmpint;
             #endif
             Dprintf("NameD %c %d %d\n\r", d->cmdstr[1],tmpint,tmpint2);
+            #ifdef EXLINK_MODE
+            sprintf(d->rspstr, "D%d",tmpint);
+            #else
             sprintf(d->rspstr, "GP%d",tmpint2);
+            #endif
             ret=1;            
           } else  if(d->cmdstr[1]=='A'){
             #ifdef EXLINK_MODE

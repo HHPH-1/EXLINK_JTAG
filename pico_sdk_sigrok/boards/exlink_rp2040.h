@@ -22,7 +22,7 @@
 
 #define EXLINK_ADC_GPIO                29u
 #define EXLINK_ADC_INPUT               3u
-#define EXLINK_ADC_CHANNEL_COUNT       1u
+#define EXLINK_ADC_CHANNEL_COUNT       0u
 #define EXLINK_ADC_ROUND_ROBIN_MASK    (1u << EXLINK_ADC_INPUT)
 
 /*

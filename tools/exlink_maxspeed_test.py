@@ -330,7 +330,51 @@ def main() -> int:
         chunks = [int(value) for value in args.dma_chunks.split(",") if value.strip()]
         frequencies = top_down_frequency_sequence(maximum_khz, args.minimum_khz, args.coarse_step_khz)
 
+        def run_with_xvc(chunk: int, khz: int, warmup: int, runs: int, log_stem: str) -> list[ProgramRun]:
+            nonlocal bridge
+            if bridge is not None:
+                bridge.close()
+                bridge = None
+            xvc_log = report_dir / f"xvc_{log_stem}.log"
+            json_summary = report_dir / f"xvc_{log_stem}.jsonl"
+            xvc_cmd = [
+                sys.executable, str(Path(__file__).with_name("exlink_xvc_server.py")),
+                "--port", args.port,
+                "--xvc-port", str(args.xvc_port),
+                "--force-tck-khz", str(khz),
+                "--engine", args.engine,
+                "--dma-chunk-bits", str(chunk),
+                "--profile",
+                "--json-summary", str(json_summary),
+                "--log-file", str(xvc_log),
+            ]
+            xvc = subprocess.Popen(xvc_cmd)
+            try:
+                if not wait_tcp_port(args.xvc_port):
+                    raise RuntimeError("XVC server did not start")
+                return run_vivado(
+                    Path(args.vivado),
+                    Path(__file__).with_name("exlink_vivado_program.tcl"),
+                    Path(args.bitstream),
+                    args.xvc_port,
+                    args.device_index,
+                    warmup,
+                    runs,
+                    report_dir / f"vivado_{log_stem}.log",
+                )
+            finally:
+                xvc.terminate()
+                try:
+                    xvc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    xvc.kill()
+                time.sleep(0.5)
+                bridge = ExlinkJtagBridge(args.port, args.baudrate, args.timeout)
+                bridge.set_dma_chunk_bits(chunk)
+                bridge.select_engine(args.engine)
+
         for chunk in chunks:
+            assert bridge is not None
             bridge.set_dma_chunk_bits(chunk)
             bridge.select_engine(args.engine)
             for khz in frequencies:
@@ -352,45 +396,7 @@ def main() -> int:
                         continue
                     if not args.vivado or not args.bitstream:
                         raise RuntimeError("--vivado and --bitstream are required unless --skip-vivado is used")
-                    xvc_log = report_dir / f"xvc_{chunk}_{khz}.log"
-                    json_summary = report_dir / f"xvc_{chunk}_{khz}.jsonl"
-                    xvc_cmd = [
-                        sys.executable, str(Path(__file__).with_name("exlink_xvc_server.py")),
-                        "--port", args.port,
-                        "--xvc-port", str(args.xvc_port),
-                        "--force-tck-khz", str(khz),
-                        "--engine", args.engine,
-                        "--dma-chunk-bits", str(chunk),
-                        "--profile",
-                        "--json-summary", str(json_summary),
-                        "--log-file", str(xvc_log),
-                    ]
-                    bridge.close()
-                    bridge = None
-                    xvc = subprocess.Popen(xvc_cmd)
-                    try:
-                        if not wait_tcp_port(args.xvc_port):
-                            raise RuntimeError("XVC server did not start")
-                        vivado_runs = run_vivado(
-                            Path(args.vivado),
-                            Path(__file__).with_name("exlink_vivado_program.tcl"),
-                            Path(args.bitstream),
-                            args.xvc_port,
-                            args.device_index,
-                            args.warmup,
-                            1,
-                            report_dir / f"vivado_{chunk}_{khz}.log",
-                        )
-                    finally:
-                        xvc.terminate()
-                        try:
-                            xvc.wait(timeout=5)
-                        except subprocess.TimeoutExpired:
-                            xvc.kill()
-                        time.sleep(0.5)
-                        bridge = ExlinkJtagBridge(args.port, args.baudrate, args.timeout)
-                        bridge.set_dma_chunk_bits(chunk)
-                        bridge.select_engine(args.engine)
+                    vivado_runs = run_with_xvc(chunk, khz, args.warmup, args.runs, f"{chunk}_{khz}")
                     result.vivado_pass = all_test_runs_pass(vivado_runs)
                     result.download_times_s = [run.elapsed_ms / 1000.0 for run in vivado_runs if run.type == "test" and run.status == "PASS"]
                     result.warmup_time_s = next((run.elapsed_ms / 1000.0 for run in vivado_runs if run.type == "warmup"), None)
@@ -406,6 +412,28 @@ def main() -> int:
                     except Exception:
                         pass
                 results.append(result)
+
+        if not args.skip_vivado:
+            downloadable = [r for r in results if r.vivado_pass and r.times()]
+            for candidate in sorted(downloadable, key=lambda r: summarize_times(r.times())["median"]):
+                khz = max(1, candidate.requested_tck_hz // 1000)
+                try:
+                    confirm_runs = run_with_xvc(
+                        candidate.dma_chunk_bits,
+                        khz,
+                        args.warmup,
+                        args.confirm_runs,
+                        f"confirm_{candidate.dma_chunk_bits}_{khz}",
+                    )
+                    test_runs = [run for run in confirm_runs if run.type == "test"]
+                    candidate.confirmed = len(test_runs) == args.confirm_runs and all(run.status == "PASS" for run in test_runs)
+                    if candidate.confirmed:
+                        candidate.download_times_s = [run.elapsed_ms / 1000.0 for run in test_runs]
+                        candidate.warmup_time_s = next((run.elapsed_ms / 1000.0 for run in confirm_runs if run.type == "warmup"), None)
+                        break
+                    candidate.failure_reason = "10-run confirmation failed"
+                except Exception as exc:
+                    candidate.failure_reason = f"confirmation failed: {exc}"
 
         environment = {
             "git_commit": subprocess.run(["git", "-C", "sigrok-pico", "rev-parse", "HEAD"], text=True, stdout=subprocess.PIPE).stdout.strip(),

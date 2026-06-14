@@ -13,6 +13,10 @@
 #include "pico/stdlib.h"
 #include "pico/time.h"
 
+#ifdef EXLINK_MULTIFUNCTION
+#include "multifunction/mode_workspace.h"
+#endif
+
 #include <string.h>
 
 #define EXLINK_JTAG_PIO_INSTANCE pio0
@@ -74,8 +78,13 @@ static uint32_t dma_chunk_bits =
 #else
     JTAG_ENGINE_DMA_CHUNK_2048_BITS;
 #endif
+#ifdef EXLINK_MULTIFUNCTION
+static uint32_t *tx_dma_words;
+static uint32_t *rx_dma_words;
+#else
 static uint32_t tx_dma_words[EXLINK_JTAG_PIO_TX_DMA_WORDS];
 static uint32_t rx_dma_words[EXLINK_JTAG_PIO_RX_WORDS_PER_CHUNK];
+#endif
 static dma_channel_config tx_dma_config;
 static dma_channel_config rx_dma_config;
 static bool dma_configs_initialized = false;
@@ -96,6 +105,27 @@ static pio_program_t exlink_jtag_fast_program = {
 static bool instructions_initialized = false;
 
 static void jtag_pio_configure_dma_channels(void);
+
+#ifdef EXLINK_MULTIFUNCTION
+static bool jtag_pio_claim_workspace(void)
+{
+    if (tx_dma_words != 0 && rx_dma_words != 0) {
+        return true;
+    }
+
+    _Static_assert((EXLINK_JTAG_PIO_TX_DMA_WORDS * sizeof(uint32_t)) +
+                   (EXLINK_JTAG_PIO_RX_WORDS_PER_CHUNK * sizeof(uint32_t)) <
+                   EXLINK_MODE_WORKSPACE_BYTES,
+                   "JTAG PIO DMA buffers must fit in the shared mode workspace");
+
+    tx_dma_words = (uint32_t *)exlink_mode_workspace_alloc(
+        EXLINK_JTAG_PIO_TX_DMA_WORDS * sizeof(uint32_t), 4u);
+    rx_dma_words = (uint32_t *)exlink_mode_workspace_alloc(
+        EXLINK_JTAG_PIO_RX_WORDS_PER_CHUNK * sizeof(uint32_t), 4u);
+
+    return tx_dma_words != 0 && rx_dma_words != 0;
+}
+#endif
 
 static const uint32_t jtag_tx_tms_lut[16] = {
     0x00000000u, 0x00000011u, 0x00001100u, 0x00001111u,
@@ -588,6 +618,12 @@ bool jtag_pio_reconfigure(void)
 
 bool jtag_pio_init(void)
 {
+#ifdef EXLINK_MULTIFUNCTION
+    if (!jtag_pio_claim_workspace()) {
+        return false;
+    }
+#endif
+
     if (sm < 0) {
         jtag_pio_init_program_instructions();
 

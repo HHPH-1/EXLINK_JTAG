@@ -19,6 +19,11 @@
 
 #include "sr_device.h"
 
+#ifdef EXLINK_MULTIFUNCTION
+#include "multifunction/mode_control.h"
+#include "multifunction/mode_workspace.h"
+#endif
+
 #ifdef SIGROK_BOARD_EXLINK
 _Static_assert(PICO_FLASH_SIZE_BYTES == EXLINK_FLASH_SIZE_BYTES,
                "Exlink RP2040 requires a 2 MB flash configuration");
@@ -733,7 +738,7 @@ void core1_entry(){
   }//core1_entry
 
 #endif //PIN_TEST_MODE
-int main(){
+int exlink_scope_mode_main(void){
     int delay=100;
     stdio_usb_init();
     #if (UART_EN == 1)
@@ -895,6 +900,14 @@ int main(){
     bus_ctrl_hw->priority = BUSCTRL_BUS_PRIORITY_DMA_W_BITS | BUSCTRL_BUS_PRIORITY_DMA_R_BITS;
     
     init(&dev);
+#ifdef EXLINK_MULTIFUNCTION
+    _Static_assert(DMA_BUF_SIZE <= EXLINK_MODE_WORKSPACE_BYTES,
+                   "scope capture buffer must fit in the shared mode workspace");
+    exlink_mode_workspace_reset();
+    capture_buf=exlink_mode_workspace_base();
+    Dprintf("Shared workspace capture buf start %p size %d\n\r",
+            (void *)capture_buf, DMA_BUF_SIZE);
+#else
     //Since RP2040 is 32 bit this should always be 4B aligned, and it must be because the PIO
     //does DMA on a per byte basis
     //If either malloc fails the code will just hang
@@ -906,6 +919,7 @@ int main(){
     tptr=malloc(10000);
     Dprintf("10K free start %p\n\r",(void *)tptr);
     free(tptr); 
+#endif
 
 
    gpio_init_mask(GPIO_D_MASK); //set as GPIO_FUNC_SIO and clear output enable
@@ -1295,7 +1309,19 @@ for faster parsing.
    //The plus ends an aborted loop, is ignored by IDLE, and sends started to IDLE.
    //In all other cases the effect is not immediate and it's up to the interrupt handler
    //or send_half to make use of it.
-   if(usbintin=='+'){
+   bool control_consumed=false;
+#ifdef EXLINK_MULTIFUNCTION
+   if(usbintin>=0){
+      control_consumed=exlink_mode_control_feed_char((uint8_t)usbintin,
+                                                     EXLINK_MODE_SCOPE,
+                                                     dev.state!=IDLE,
+                                                     dev.cmdstrptr==0);
+   }
+#endif
+   if(control_consumed){
+       // The control parser consumed this byte; leave the sigrok parser state untouched.
+    }
+   else if(usbintin=='+'){
        //Dprintf("USB plus\n\r");
        if(dev.state==ABORTED){
         //Clear abort so we stop sending "!"
@@ -1404,6 +1430,13 @@ for faster parsing.
  
 
 }//main
+
+#ifndef EXLINK_MULTIFUNCTION
+int main(void)
+{
+    return exlink_scope_mode_main();
+}
+#endif
 //Depracated trigger logic
 //This HW based trigger which should be part of send slices was tested enough to confirm the 
 //trigger value worked, however it

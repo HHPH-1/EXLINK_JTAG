@@ -3,6 +3,12 @@
 **/.vscode/c_cpp_properties.json
 **/.vscode/launch.json
 **/build/**
+**/__pycache__/**
+*.py[cod]
+.venv/
+.venv-*/
+.venv-exlink-manager/
+dist/
 
 # Except the following files
 !*.uf2

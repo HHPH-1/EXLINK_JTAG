@@ -41,6 +41,61 @@ if(SIGROK_BOARD_EXLINK)
     )
 endif()
 
+if(SIGROK_BOARD_EXLINK)
+    set(EXLINK_MULTIFUNCTION_JTAG_SOURCES
+        exlink_jtag_bridge/main.c
+        exlink_jtag_bridge/jtag_engine.c
+        exlink_jtag_bridge/jtag_gpio.c
+        exlink_jtag_bridge/jtag_pio.c
+        exlink_jtag_bridge/jtag_profile.c
+        exlink_jtag_bridge/jtag_protocol.c
+        exlink_jtag_bridge/usb_cdc_transport.c
+    )
+
+    add_executable(exlink_multifunction
+        multifunction/main.c
+        multifunction/mode_boot.c
+        multifunction/mode_control.c
+        multifunction/mode_workspace.c
+        pico_sdk_sigrok.c
+        sr_device.c
+        ${EXLINK_MULTIFUNCTION_JTAG_SOURCES}
+    )
+
+    target_compile_definitions(exlink_multifunction PRIVATE
+        SIGROK_BOARD_EXLINK=1
+        EXLINK_MULTIFUNCTION=1
+        EXLINK_JTAG_DEBUG=0
+        EXLINK_JTAG_PERFORMANCE_MODE=1
+        CFG_TUD_CDC_RX_BUFSIZE=8192
+        CFG_TUD_CDC_TX_BUFSIZE=8192
+    )
+
+    target_include_directories(exlink_multifunction PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/boards
+        ${CMAKE_CURRENT_LIST_DIR}/exlink_jtag_bridge
+        ${CMAKE_CURRENT_LIST_DIR}/multifunction
+    )
+
+    target_link_libraries(exlink_multifunction
+        pico_stdlib
+        pico_stdio_usb
+        hardware_adc
+        hardware_clocks
+        hardware_dma
+        hardware_gpio
+        hardware_pio
+        hardware_sync
+        hardware_watchdog
+        pico_multicore
+    )
+
+    pico_enable_stdio_usb(exlink_multifunction 1)
+    pico_enable_stdio_uart(exlink_multifunction 0)
+    pico_add_extra_outputs(exlink_multifunction)
+endif()
+
 pico_enable_stdio_usb(pico_sdk_sigrok 1)
 pico_enable_stdio_uart(pico_sdk_sigrok 0)
 

@@ -6,6 +6,11 @@
 #include "hardware/clocks.h"
 #include "tusb.h"
 
+#ifdef EXLINK_MULTIFUNCTION
+#include "multifunction/mode_control.h"
+#include "multifunction/mode_workspace.h"
+#endif
+
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -29,9 +34,16 @@
 #define PROFILE_TEXT_BUFFER_BYTES 4096u
 #define INFO_TEXT_BUFFER_BYTES 1024u
 
+#ifdef EXLINK_MULTIFUNCTION
+static uint8_t *tms_buffer;
+static uint8_t *tdi_buffer;
+static uint8_t *tdo_buffer;
+static bool shift_buffers_ready;
+#else
 static uint8_t tms_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static uint8_t tdi_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static uint8_t tdo_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
+#endif
 static char profile_text_buffer[PROFILE_TEXT_BUFFER_BYTES];
 static char info_text_buffer[INFO_TEXT_BUFFER_BYTES];
 
@@ -179,6 +191,13 @@ static void handle_reset(void)
 
 static void handle_shift(void)
 {
+#ifdef EXLINK_MULTIFUNCTION
+    if (!shift_buffers_ready) {
+        (void)write_error(ERROR_INVALID_COMMAND);
+        return;
+    }
+#endif
+
     bool profiling = jtag_profile_is_enabled();
     uint64_t shift_start_us = 0u;
     uint64_t request_parse_us = 0u;
@@ -384,9 +403,20 @@ static void handle_profile(void)
 
 void jtag_protocol_init(void)
 {
-    memset(tms_buffer, 0, sizeof(tms_buffer));
-    memset(tdi_buffer, 0, sizeof(tdi_buffer));
-    memset(tdo_buffer, 0, sizeof(tdo_buffer));
+#ifdef EXLINK_MULTIFUNCTION
+    _Static_assert(EXLINK_JTAG_MAX_SHIFT_BYTES * 3u < EXLINK_MODE_WORKSPACE_BYTES,
+                   "JTAG shift buffers must fit in the shared mode workspace");
+    tms_buffer = (uint8_t *)exlink_mode_workspace_alloc(EXLINK_JTAG_MAX_SHIFT_BYTES, 4u);
+    tdi_buffer = (uint8_t *)exlink_mode_workspace_alloc(EXLINK_JTAG_MAX_SHIFT_BYTES, 4u);
+    tdo_buffer = (uint8_t *)exlink_mode_workspace_alloc(EXLINK_JTAG_MAX_SHIFT_BYTES, 4u);
+    shift_buffers_ready = tms_buffer != 0 && tdi_buffer != 0 && tdo_buffer != 0;
+    if (!shift_buffers_ready) {
+        return;
+    }
+#endif
+    memset(tms_buffer, 0, EXLINK_JTAG_MAX_SHIFT_BYTES);
+    memset(tdi_buffer, 0, EXLINK_JTAG_MAX_SHIFT_BYTES);
+    memset(tdo_buffer, 0, EXLINK_JTAG_MAX_SHIFT_BYTES);
 }
 
 void jtag_protocol_task(void)
@@ -399,6 +429,12 @@ void jtag_protocol_task(void)
     if (tud_cdc_read(&command, 1u) != 1u) {
         return;
     }
+
+#ifdef EXLINK_MULTIFUNCTION
+    if (exlink_mode_control_feed_char(command, EXLINK_MODE_JTAG, false, true)) {
+        return;
+    }
+#endif
 
     switch (command) {
     case 'I':

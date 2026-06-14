@@ -4,12 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 from dataclasses import dataclass, field
 import json
 import socket
 import struct
 import sys
+import threading
 import time
+import traceback
+from typing import Callable
 
 from exlink_jtag_test import (
     BridgeError,
@@ -122,6 +126,40 @@ class ServerState:
     total_accepted_clients: int = 0
     serial_timeout_count: int = 0
     protocol_error_count: int = 0
+
+
+@dataclass
+class XvcServerConfig:
+    serial_port: str
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 2542
+    tck_khz: int = 12500
+    engine: str = "pio_safe"
+    dma_chunk_bits: int = 8192
+    max_shift_bits: int = 131072
+    max_logical_shift_bits: int = DEFAULT_LOGICAL_SHIFT_LIMIT_BITS
+    baudrate: int = 115200
+    timeout: float = 2.0
+    socket_timeout: float = 1.0
+    profile: bool = False
+    log_shifts: bool = False
+    verbose_bits: bool = False
+
+
+@dataclass
+class XvcStatus:
+    running: bool = False
+    listening: bool = False
+    client_connected: bool = False
+    listen_host: str = "127.0.0.1"
+    listen_port: int = 2542
+    serial_port: str = ""
+    shift_request_count: int = 0
+    total_shifted_bits: int = 0
+    serial_timeout_count: int = 0
+    protocol_error_count: int = 0
+    total_accepted_clients: int = 0
+    last_error: str = ""
 
 
 @dataclass
@@ -536,10 +574,17 @@ def handle_client(
         dma_chunk_bits=getattr(args, "actual_dma_chunk_bits", 0),
     )
     recovery_required = False
+    stop_event: threading.Event | None = getattr(args, "_stop_event", None)
+    status: XvcStatus | None = getattr(args, "_status", None)
+    if status is not None:
+        status.client_connected = True
+        status.total_accepted_clients = state.total_accepted_clients
     print(f"XVC client connected: {client_address}")
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             command = recv_command(sock)
 
             if command == b"getinfo:":
@@ -606,6 +651,9 @@ def handle_client(
                 timings["tcp_send_ns"] = tcp_send_end - tcp_send_start
                 timings["shift_total_ns"] = tcp_send_end - shift_start
                 stats.record_shift_perf(bit_count, timings, chunks, unaligned_chunks)
+                if status is not None:
+                    status.shift_request_count = stats.shift_request_count
+                    status.total_shifted_bits = stats.total_shifted_bits
                 continue
 
             raise ProtocolError(f"unhandled XVC command {command!r}")
@@ -616,16 +664,25 @@ def handle_client(
         stats.protocol_error_count += 1
         state.protocol_error_count += 1
         recovery_required = True
+        if status is not None:
+            status.protocol_error_count = state.protocol_error_count
+            status.last_error = str(exc)
         print(f"Protocol error: {exc}")
     except SerialTimeoutError as exc:
         stats.serial_timeout_count += 1
         state.serial_timeout_count += 1
         recovery_required = True
+        if status is not None:
+            status.serial_timeout_count = state.serial_timeout_count
+            status.last_error = str(exc)
         print(f"Serial timeout: {exc}")
     except BridgeError as exc:
         stats.protocol_error_count += 1
         state.protocol_error_count += 1
         recovery_required = True
+        if status is not None:
+            status.protocol_error_count = state.protocol_error_count
+            status.last_error = str(exc)
         print(f"Bridge error: {exc}")
     except OSError as exc:
         print(f"Client socket closed: {exc}")
@@ -651,6 +708,12 @@ def handle_client(
             else:
                 with open(args.json_summary, "a", encoding="utf-8") as f:
                     f.write(summary_json + "\n")
+        if status is not None:
+            status.client_connected = False
+            status.shift_request_count = stats.shift_request_count
+            status.total_shifted_bits = stats.total_shifted_bits
+            status.serial_timeout_count = state.serial_timeout_count
+            status.protocol_error_count = state.protocol_error_count
         print("Waiting for XVC client...")
 
 
@@ -675,6 +738,7 @@ def initialize_bridge(args: argparse.Namespace) -> tuple[ExlinkJtagBridge, str, 
 
         requested_hz = (args.force_tck_khz or args.default_tck_khz) * 1000
         actual_pio_tck_hz = bridge.set_pio_clock_hz(requested_hz)
+        bridge.reset_tap()
         if args.profile:
             bridge.profile("clear")
             bridge.profile("on")
@@ -692,13 +756,17 @@ def initialize_bridge(args: argparse.Namespace) -> tuple[ExlinkJtagBridge, str, 
         raise
 
 
-def serve(args: argparse.Namespace) -> None:
+def serve(args: argparse.Namespace, stop_event: threading.Event | None = None) -> None:
     bridge: ExlinkJtagBridge | None = None
     server: socket.socket | None = None
     state = ServerState()
+    if stop_event is None:
+        stop_event = getattr(args, "_stop_event", None)
+    status: XvcStatus | None = getattr(args, "_status", None)
 
     try:
         bridge, firmware_info, firmware_max_shift_bits, dma_enabled, actual_pio_tck_hz = initialize_bridge(args)
+        args._bridge = bridge
         args.firmware_max_shift_bits = firmware_max_shift_bits
         args.xvc_info = f"xvcServer_v1.0:{firmware_max_shift_bits}\n".encode("ascii")
 
@@ -715,32 +783,169 @@ def serve(args: argparse.Namespace) -> None:
         print(f"PIO TCK: {actual_pio_tck_hz / 1000:.0f} kHz")
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        args._server_socket = server
         server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         server.bind((args.xvc_host, args.xvc_port))
         server.listen(1)
         server.settimeout(1.0)
+        if status is not None:
+            status.running = True
+            status.listening = True
+            status.listen_host = args.xvc_host
+            status.listen_port = args.xvc_port
+            status.serial_port = args.port
         print(f"Listening on {args.xvc_host}:{args.xvc_port}")
         print("Waiting for XVC client...")
 
-        while True:
+        while stop_event is None or not stop_event.is_set():
             try:
                 client, _addr = server.accept()
             except socket.timeout:
                 continue
+            except OSError:
+                if stop_event is not None and stop_event.is_set():
+                    break
+                raise
 
             state.total_accepted_clients += 1
+            if status is not None:
+                status.total_accepted_clients = state.total_accepted_clients
 
             client.settimeout(args.socket_timeout)
             with client:
-                handle_client(client, bridge, args, state)
+                args._client_socket = client
+                try:
+                    handle_client(client, bridge, args, state)
+                finally:
+                    args._client_socket = None
 
     except KeyboardInterrupt:
         print("Shutting down on Ctrl+C")
     finally:
+        if status is not None:
+            status.listening = False
+            status.client_connected = False
+            status.serial_timeout_count = state.serial_timeout_count
+            status.protocol_error_count = state.protocol_error_count
         if server is not None:
-            server.close()
+            with contextlib.suppress(OSError):
+                server.close()
+        args._server_socket = None
         if bridge is not None:
-            bridge.close()
+            with contextlib.suppress(Exception):
+                bridge.close()
+        args._bridge = None
+        if status is not None:
+            status.running = False
+
+
+def namespace_from_config(config: XvcServerConfig, stop_event: threading.Event | None = None,
+                          status: XvcStatus | None = None) -> argparse.Namespace:
+    logical_shift_limit = max(
+        config.max_logical_shift_bits,
+        config.max_shift_bits,
+        DEFAULT_LOGICAL_SHIFT_LIMIT_BITS,
+    )
+    return argparse.Namespace(
+        port=config.serial_port,
+        baudrate=config.baudrate,
+        timeout=config.timeout,
+        xvc_host=config.listen_host,
+        xvc_port=config.listen_port,
+        socket_timeout=config.socket_timeout,
+        default_tck_khz=config.tck_khz,
+        force_tck_khz=config.tck_khz,
+        engine=config.engine,
+        dma_chunk_bits=config.dma_chunk_bits,
+        profile=config.profile,
+        json_summary=None,
+        log_file=None,
+        max_logical_shift_bits=logical_shift_limit,
+        log_shifts=config.log_shifts,
+        verbose_bits=config.verbose_bits,
+        no_stats=False,
+        _stop_event=stop_event,
+        _status=status,
+        _server_socket=None,
+        _client_socket=None,
+        _bridge=None,
+    )
+
+
+class ExlinkXvcServer:
+    def __init__(
+        self,
+        config: XvcServerConfig,
+        log_callback: Callable[[str], None] | None = None,
+    ):
+        self.config = config
+        self.log_callback = log_callback
+        self._stop_event = threading.Event()
+        self._status = XvcStatus(
+            listen_host=config.listen_host,
+            listen_port=config.listen_port,
+            serial_port=config.serial_port,
+        )
+        self._args = namespace_from_config(config, self._stop_event, self._status)
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def start(self) -> None:
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                raise RuntimeError("XVC server is already running")
+            self._stop_event.clear()
+            self._status = XvcStatus(
+                running=True,
+                listen_host=self.config.listen_host,
+                listen_port=self.config.listen_port,
+                serial_port=self.config.serial_port,
+            )
+            self._args = namespace_from_config(self.config, self._stop_event, self._status)
+            self._thread = threading.Thread(target=self._run, name="ExlinkXvcServer", daemon=True)
+            self._thread.start()
+
+    def _run(self) -> None:
+        try:
+            if self.log_callback is not None:
+                self.log_callback("XVC server thread starting")
+            serve(self._args, self._stop_event)
+            if self.log_callback is not None:
+                self.log_callback("XVC server thread stopped")
+        except Exception as exc:  # pragma: no cover - defensive path for GUI packaging
+            self._status.last_error = str(exc)
+            self._status.running = False
+            if self.log_callback is not None:
+                self.log_callback(f"XVC server failed: {exc}")
+                self.log_callback(traceback.format_exc())
+            else:
+                raise
+        finally:
+            self._status.running = False
+            self._status.listening = False
+            self._status.client_connected = False
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        for attr in ("_client_socket", "_server_socket"):
+            sock = getattr(self._args, attr, None)
+            if sock is not None:
+                with contextlib.suppress(OSError):
+                    sock.shutdown(socket.SHUT_RDWR)
+                with contextlib.suppress(OSError):
+                    sock.close()
+        bridge = getattr(self._args, "_bridge", None)
+        if bridge is not None:
+            with contextlib.suppress(Exception):
+                bridge.close()
+
+    def wait(self, timeout: float | None = None) -> None:
+        thread = self._thread
+        if thread is not None:
+            thread.join(timeout)
+
+    def get_status(self) -> XvcStatus:
+        return XvcStatus(**self._status.__dict__)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -751,10 +956,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xvc-host", "--host", dest="xvc_host", default="127.0.0.1")
     parser.add_argument("--xvc-port", "--tcp-port", dest="xvc_port", type=int, default=2542)
     parser.add_argument("--socket-timeout", type=float, default=10.0)
-    parser.add_argument("--default-tck-khz", type=int, default=1000)
+    parser.add_argument("--default-tck-khz", type=int, default=12500)
     parser.add_argument("--force-tck-khz", type=int, help="hold firmware TCK at this value despite Vivado settck requests")
-    parser.add_argument("--engine", choices=["pio", "pio_safe", "pio_fast"], default="pio")
-    parser.add_argument("--dma-chunk-bits", type=int, choices=[2048, 4096, 8192, 16384, 32768])
+    parser.add_argument("--engine", choices=["pio", "pio_safe", "pio_fast"], default="pio_safe")
+    parser.add_argument("--dma-chunk-bits", type=int, choices=[2048, 4096, 8192, 16384, 32768], default=8192)
     parser.add_argument("--profile", action="store_true", help="enable firmware profile for this XVC session")
     parser.add_argument("--json-summary", nargs="?", const="-", help="write a JSON session summary to this file or stdout")
     parser.add_argument("--log-file", help="tee server stdout/stderr to this file")

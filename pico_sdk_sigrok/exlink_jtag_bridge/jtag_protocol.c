@@ -1,0 +1,179 @@
+#include "jtag_protocol.h"
+
+#include "jtag_gpio.h"
+#include "usb_cdc_transport.h"
+#include "tusb.h"
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+#define USB_IO_TIMEOUT_MS 1000u
+
+#define RESP_STATUS_OK        0u
+#define RESP_STATUS_BAD_LEN   1u
+#define RESP_STATUS_TIMEOUT   2u
+#define RESP_STATUS_EXEC_FAIL 3u
+
+#define ERROR_INVALID_COMMAND 1u
+#define ERROR_TIMEOUT         2u
+
+static uint8_t tms_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
+static uint8_t tdi_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
+static uint8_t tdo_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
+
+static void put_u16_le(uint8_t *buffer, uint16_t value)
+{
+    buffer[0] = (uint8_t)(value & 0xffu);
+    buffer[1] = (uint8_t)((value >> 8) & 0xffu);
+}
+
+static void put_u32_le(uint8_t *buffer, uint32_t value)
+{
+    buffer[0] = (uint8_t)(value & 0xffu);
+    buffer[1] = (uint8_t)((value >> 8) & 0xffu);
+    buffer[2] = (uint8_t)((value >> 16) & 0xffu);
+    buffer[3] = (uint8_t)((value >> 24) & 0xffu);
+}
+
+static uint32_t get_u32_le(const uint8_t *buffer)
+{
+    return (uint32_t)buffer[0] |
+           ((uint32_t)buffer[1] << 8) |
+           ((uint32_t)buffer[2] << 16) |
+           ((uint32_t)buffer[3] << 24);
+}
+
+static bool write_error(uint8_t error_code)
+{
+    uint8_t response[2] = {'e', error_code};
+    return usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
+}
+
+static bool write_shift_status(uint8_t status, uint32_t bit_count, bool include_tdo)
+{
+    uint8_t header[6];
+    header[0] = 's';
+    header[1] = status;
+    put_u32_le(&header[2], bit_count);
+
+    if (!usb_cdc_write_all(header, sizeof(header), USB_IO_TIMEOUT_MS)) {
+        return false;
+    }
+
+    if (include_tdo) {
+        return usb_cdc_write_all(tdo_buffer, (bit_count + 7u) / 8u, USB_IO_TIMEOUT_MS);
+    }
+
+    return true;
+}
+
+static void handle_info(void)
+{
+    static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.1";
+    uint8_t header[3];
+    header[0] = 'i';
+    put_u16_le(&header[1], (uint16_t)(sizeof(info) - 1u));
+
+    (void)usb_cdc_write_all(header, sizeof(header), USB_IO_TIMEOUT_MS);
+    (void)usb_cdc_write_all((const uint8_t *)info, sizeof(info) - 1u, USB_IO_TIMEOUT_MS);
+}
+
+static void handle_reset(void)
+{
+    uint8_t response[2] = {'t', RESP_STATUS_OK};
+    jtag_tap_reset();
+    (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
+}
+
+static void handle_shift(void)
+{
+    uint8_t length_buffer[4];
+    if (!usb_cdc_read_exact(length_buffer, sizeof(length_buffer), USB_IO_TIMEOUT_MS)) {
+        (void)write_error(ERROR_TIMEOUT);
+        return;
+    }
+
+    uint32_t bit_count = get_u32_le(length_buffer);
+    if ((bit_count == 0u) || (bit_count > EXLINK_JTAG_MAX_SHIFT_BITS)) {
+        (void)write_shift_status(RESP_STATUS_BAD_LEN, bit_count, false);
+        return;
+    }
+
+    uint32_t byte_count = (bit_count + 7u) / 8u;
+    if (!usb_cdc_read_exact(tms_buffer, byte_count, USB_IO_TIMEOUT_MS) ||
+        !usb_cdc_read_exact(tdi_buffer, byte_count, USB_IO_TIMEOUT_MS)) {
+        (void)write_shift_status(RESP_STATUS_TIMEOUT, bit_count, false);
+        return;
+    }
+
+    if (!jtag_shift_bits(bit_count, tms_buffer, tdi_buffer, tdo_buffer)) {
+        (void)write_shift_status(RESP_STATUS_EXEC_FAIL, bit_count, false);
+        return;
+    }
+
+    (void)write_shift_status(RESP_STATUS_OK, bit_count, true);
+}
+
+static void handle_clock(void)
+{
+    uint8_t value_buffer[4];
+    uint8_t response[6];
+
+    if (!usb_cdc_read_exact(value_buffer, sizeof(value_buffer), USB_IO_TIMEOUT_MS)) {
+        (void)write_error(ERROR_TIMEOUT);
+        return;
+    }
+
+    uint32_t requested = get_u32_le(value_buffer);
+    uint8_t status = RESP_STATUS_OK;
+
+    if ((requested < JTAG_MIN_HALF_PERIOD_US) || (requested > JTAG_MAX_HALF_PERIOD_US)) {
+        status = RESP_STATUS_BAD_LEN;
+    } else {
+        jtag_set_half_period_us(requested);
+    }
+
+    response[0] = 'k';
+    response[1] = status;
+    put_u32_le(&response[2], jtag_get_half_period_us());
+    (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
+}
+
+void jtag_protocol_init(void)
+{
+    memset(tms_buffer, 0, sizeof(tms_buffer));
+    memset(tdi_buffer, 0, sizeof(tdi_buffer));
+    memset(tdo_buffer, 0, sizeof(tdo_buffer));
+}
+
+void jtag_protocol_task(void)
+{
+    if (!tud_ready() || tud_cdc_available() == 0u) {
+        return;
+    }
+
+    uint8_t command = 0;
+    if (tud_cdc_read(&command, 1u) != 1u) {
+        return;
+    }
+
+    switch (command) {
+    case 'I':
+        handle_info();
+        break;
+    case 'T':
+        handle_reset();
+        break;
+    case 'S':
+        handle_shift();
+        break;
+    case 'K':
+        handle_clock();
+        break;
+    default:
+        (void)write_error(ERROR_INVALID_COMMAND);
+        break;
+    }
+}

@@ -22,6 +22,7 @@ project(pico_sdk_sigrok C CXX ASM)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 option(SIGROK_BOARD_EXLINK "Build firmware for the Exlink RP2040 board" OFF)
+option(EXLINK_BUILD_JTAG_BRIDGE "Build standalone Exlink RP2040 JTAG bridge" OFF)
 #See https://github.com/pico-coder/sigrok-pico/pull/63/  
 #setting this allows the DTR to be ignored.  In addition to this, the use of 
 #tud_cdc_connected should be replaced with tud_ready.
@@ -57,3 +58,34 @@ target_link_libraries(
     pico_multicore
     pico_stdio_usb
 )
+
+if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
+    add_executable(exlink_jtag_bridge
+        exlink_jtag_bridge/main.c
+        exlink_jtag_bridge/jtag_gpio.c
+        exlink_jtag_bridge/jtag_protocol.c
+        exlink_jtag_bridge/usb_cdc_transport.c
+    )
+
+    target_compile_definitions(exlink_jtag_bridge PRIVATE
+        SIGROK_BOARD_EXLINK=1
+        EXLINK_JTAG_DEBUG=0
+    )
+
+    target_include_directories(exlink_jtag_bridge PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/boards
+        ${CMAKE_CURRENT_LIST_DIR}/exlink_jtag_bridge
+    )
+
+    target_link_libraries(exlink_jtag_bridge
+        pico_stdlib
+        pico_stdio_usb
+        hardware_gpio
+        hardware_sync
+    )
+
+    pico_enable_stdio_usb(exlink_jtag_bridge 1)
+    pico_enable_stdio_uart(exlink_jtag_bridge 0)
+    pico_add_extra_outputs(exlink_jtag_bridge)
+endif()

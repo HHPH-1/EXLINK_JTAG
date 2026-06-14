@@ -1,5 +1,7 @@
 #include "usb_cdc_transport.h"
 
+#include "jtag_profile.h"
+
 #include "pico/time.h"
 #include "tusb.h"
 
@@ -30,6 +32,7 @@ bool usb_cdc_read_exact(uint8_t *buffer, size_t length, uint32_t timeout_ms)
             return false;
         }
 
+        jtag_profile_add_usb_rx_wait();
         tight_loop_contents();
     }
 
@@ -65,6 +68,7 @@ bool usb_cdc_write_all(const uint8_t *buffer, size_t length, uint32_t timeout_ms
             return false;
         }
 
+        jtag_profile_add_usb_tx_wait();
         tight_loop_contents();
     }
 

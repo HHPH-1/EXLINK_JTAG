@@ -1,6 +1,7 @@
 #include "jtag_protocol.h"
 
 #include "jtag_engine.h"
+#include "jtag_profile.h"
 #include "usb_cdc_transport.h"
 #include "tusb.h"
 
@@ -23,10 +24,12 @@
 
 #define ERROR_INVALID_COMMAND 1u
 #define ERROR_TIMEOUT         2u
+#define PROFILE_TEXT_BUFFER_BYTES 2048u
 
 static uint8_t tms_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static uint8_t tdi_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static uint8_t tdo_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
+static char profile_text_buffer[PROFILE_TEXT_BUFFER_BYTES];
 
 static void put_u16_le(uint8_t *buffer, uint16_t value)
 {
@@ -83,6 +86,25 @@ static bool write_engine_status(uint8_t status)
     return usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
 }
 
+static bool write_profile_response(uint8_t status, const char *text, uint16_t length)
+{
+    uint8_t header[5];
+    header[0] = 'r';
+    header[1] = status;
+    header[2] = jtag_profile_is_enabled() ? 1u : 0u;
+    put_u16_le(&header[3], length);
+
+    if (!usb_cdc_write_all(header, sizeof(header), USB_IO_TIMEOUT_MS)) {
+        return false;
+    }
+
+    if (length > 0u) {
+        return usb_cdc_write_all((const uint8_t *)text, length, USB_IO_TIMEOUT_MS);
+    }
+
+    return true;
+}
+
 static void handle_info(void)
 {
     static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.3";
@@ -103,6 +125,14 @@ static void handle_reset(void)
 
 static void handle_shift(void)
 {
+    bool profiling = jtag_profile_is_enabled();
+    uint64_t shift_start_us = 0u;
+    uint64_t request_parse_us = 0u;
+
+    if (profiling) {
+        shift_start_us = jtag_profile_now_us();
+    }
+
     uint8_t length_buffer[4];
     if (!usb_cdc_read_exact(length_buffer, sizeof(length_buffer), USB_IO_TIMEOUT_MS)) {
         (void)write_error(ERROR_TIMEOUT);
@@ -122,12 +152,38 @@ static void handle_shift(void)
         return;
     }
 
+    if (profiling) {
+        request_parse_us = jtag_profile_now_us() - shift_start_us;
+        jtag_profile_begin_shift(bit_count);
+    }
+
     if (!jtag_engine_shift_bits(bit_count, tms_buffer, tdi_buffer, tdo_buffer)) {
-        (void)write_shift_status(RESP_STATUS_EXEC_FAIL, bit_count, false);
+        uint64_t response_queue_us = 0u;
+        if (profiling) {
+            uint64_t response_start_us = jtag_profile_now_us();
+            (void)write_shift_status(RESP_STATUS_EXEC_FAIL, bit_count, false);
+            response_queue_us = jtag_profile_now_us() - response_start_us;
+            jtag_profile_finish_shift(false,
+                                      request_parse_us,
+                                      response_queue_us,
+                                      jtag_profile_now_us() - shift_start_us);
+        } else {
+            (void)write_shift_status(RESP_STATUS_EXEC_FAIL, bit_count, false);
+        }
         return;
     }
 
-    (void)write_shift_status(RESP_STATUS_OK, bit_count, true);
+    if (profiling) {
+        uint64_t response_start_us = jtag_profile_now_us();
+        (void)write_shift_status(RESP_STATUS_OK, bit_count, true);
+        uint64_t response_queue_us = jtag_profile_now_us() - response_start_us;
+        jtag_profile_finish_shift(true,
+                                  request_parse_us,
+                                  response_queue_us,
+                                  jtag_profile_now_us() - shift_start_us);
+    } else {
+        (void)write_shift_status(RESP_STATUS_OK, bit_count, true);
+    }
 }
 
 static void handle_clock(void)
@@ -217,6 +273,39 @@ static void handle_capabilities(void)
     (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
 }
 
+static void handle_profile(void)
+{
+    uint8_t action = 0u;
+    if (!usb_cdc_read_exact(&action, sizeof(action), USB_IO_TIMEOUT_MS)) {
+        (void)write_error(ERROR_TIMEOUT);
+        return;
+    }
+
+    uint8_t status = RESP_STATUS_OK;
+    switch ((JtagProfileAction_t)action) {
+    case JTAG_PROFILE_ACTION_SHOW:
+        break;
+    case JTAG_PROFILE_ACTION_CLEAR:
+        jtag_profile_clear();
+        break;
+    case JTAG_PROFILE_ACTION_ON:
+        jtag_profile_set_enabled(true);
+        break;
+    case JTAG_PROFILE_ACTION_OFF:
+        jtag_profile_set_enabled(false);
+        break;
+    default:
+        status = RESP_STATUS_BAD_LEN;
+        break;
+    }
+
+    size_t length = jtag_profile_format(profile_text_buffer, sizeof(profile_text_buffer));
+    if (length > 0xffffu) {
+        length = 0xffffu;
+    }
+    (void)write_profile_response(status, profile_text_buffer, (uint16_t)length);
+}
+
 void jtag_protocol_init(void)
 {
     memset(tms_buffer, 0, sizeof(tms_buffer));
@@ -256,6 +345,9 @@ void jtag_protocol_task(void)
         break;
     case 'Q':
         handle_capabilities();
+        break;
+    case 'R':
+        handle_profile();
         break;
     default:
         (void)write_error(ERROR_INVALID_COMMAND);

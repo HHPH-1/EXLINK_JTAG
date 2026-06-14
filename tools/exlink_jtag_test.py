@@ -25,6 +25,12 @@ ENGINE_VALUES = {value: key for key, value in ENGINE_NAMES.items()}
 JTAG_ENGINE_FLAG_BITBANG = 1 << 0
 JTAG_ENGINE_FLAG_PIO = 1 << 1
 JTAG_ENGINE_FLAG_DMA = 1 << 2
+PROFILE_ACTIONS = {
+    "show": 0,
+    "clear": 1,
+    "on": 2,
+    "off": 3,
+}
 
 
 class BridgeError(RuntimeError):
@@ -130,6 +136,20 @@ class ExlinkJtagBridge:
         if status != 0:
             raise BridgeError(f"capabilities query failed with status {status}")
         return active, supported, max_shift_bits
+
+    def profile(self, action: str) -> Tuple[bool, str]:
+        if action not in PROFILE_ACTIONS:
+            raise ValueError(f"unknown profile action {action!r}")
+
+        self.write_all(b"R" + bytes([PROFILE_ACTIONS[action]]))
+        self.expect_error_or(b"r")
+        status = self.read_exact(1)[0]
+        enabled = self.read_exact(1)[0] != 0
+        length = struct.unpack("<H", self.read_exact(2))[0]
+        text = self.read_exact(length).decode("ascii", errors="replace")
+        if status != 0:
+            raise BridgeError(f"profile {action} failed with status {status}")
+        return enabled, text
 
     def select_engine(self, engine: str) -> int:
         if engine not in ENGINE_VALUES:
@@ -276,6 +296,11 @@ def cmd_capabilities(bridge: ExlinkJtagBridge, _args: argparse.Namespace) -> Non
     print(f"Maximum shift: {max_shift_bits} bits")
 
 
+def cmd_profile(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
+    _enabled, text = bridge.profile(args.action)
+    print(text, end="" if text.endswith("\n") else "\n")
+
+
 def cmd_engine(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
     active = bridge.select_engine(args.engine)
     print(f"PASS: active engine is {engine_name(active)}")
@@ -387,6 +412,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     capabilities_parser = subparsers.add_parser("capabilities")
     capabilities_parser.set_defaults(func=cmd_capabilities)
+
+    profile_parser = subparsers.add_parser("profile")
+    profile_parser.add_argument("action", choices=sorted(PROFILE_ACTIONS))
+    profile_parser.set_defaults(func=cmd_profile)
 
     engine_parser = subparsers.add_parser("engine")
     engine_parser.add_argument("engine", choices=sorted(ENGINE_VALUES))

@@ -65,6 +65,7 @@ if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
         exlink_jtag_bridge/jtag_engine.c
         exlink_jtag_bridge/jtag_gpio.c
         exlink_jtag_bridge/jtag_pio.c
+        exlink_jtag_bridge/jtag_profile.c
         exlink_jtag_bridge/jtag_protocol.c
         exlink_jtag_bridge/usb_cdc_transport.c
     )

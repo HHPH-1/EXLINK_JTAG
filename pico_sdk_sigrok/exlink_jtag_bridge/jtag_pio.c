@@ -2,6 +2,7 @@
 
 #include "jtag_protocol.h"
 #include "jtag_engine.h"
+#include "jtag_profile.h"
 #include "exlink_rp2040.h"
 
 #include "hardware/clocks.h"
@@ -176,6 +177,7 @@ static void jtag_pio_abort_dma_if_busy(void)
 
 static void jtag_pio_recover_after_error(void)
 {
+    jtag_profile_add_pio_recovery();
     jtag_pio_abort_dma_if_busy();
     pio_sm_set_enabled(pio, (uint)sm, false);
     pio_sm_clear_fifos(pio, (uint)sm);
@@ -357,10 +359,20 @@ static bool jtag_pio_shift_dma_chunk(const uint8_t *tms_bits,
         return false;
     }
 
+    bool profiling = jtag_profile_is_enabled();
+    uint64_t stage_start_us = 0u;
+    if (profiling) {
+        stage_start_us = jtag_profile_now_us();
+    }
+
     const uint32_t tx_transfer_count = jtag_pio_pack_tx_chunk(tms_bits,
                                                               tdi_bits,
                                                               source_bit_offset,
                                                               bit_count);
+    if (profiling) {
+        jtag_profile_add_tx_prepare_us(jtag_profile_now_us() - stage_start_us);
+    }
+
     const uint32_t rx_transfer_count = (bit_count / 32u) + 1u;
 
     if ((tx_transfer_count == 0u) ||
@@ -369,6 +381,11 @@ static bool jtag_pio_shift_dma_chunk(const uint8_t *tms_bits,
     }
 
     memset(rx_dma_words, 0, rx_transfer_count * sizeof(rx_dma_words[0]));
+
+    if (profiling) {
+        stage_start_us = jtag_profile_now_us();
+        jtag_profile_add_dma_chunk();
+    }
 
     jtag_pio_abort_dma_if_busy();
     pio_sm_set_enabled(pio, (uint)sm, false);
@@ -410,6 +427,7 @@ static bool jtag_pio_shift_dma_chunk(const uint8_t *tms_bits,
            dma_channel_is_busy((uint)rx_dma_channel)) {
         if (absolute_time_diff_us(start, get_absolute_time()) >
             (int64_t)EXLINK_JTAG_PIO_TIMEOUT_US) {
+            jtag_profile_add_dma_timeout();
             jtag_pio_recover_after_error();
             return false;
         }
@@ -420,6 +438,10 @@ static bool jtag_pio_shift_dma_chunk(const uint8_t *tms_bits,
     pio_sm_set_enabled(pio, (uint)sm, false);
     pio_drive_idle(0u);
 
+    if (profiling) {
+        jtag_profile_add_dma_pio_us(jtag_profile_now_us() - stage_start_us);
+    }
+
     if (dma_channel_is_busy((uint)tx_dma_channel) ||
         dma_channel_is_busy((uint)rx_dma_channel) ||
         !pio_sm_is_rx_fifo_empty(pio, (uint)sm)) {
@@ -427,7 +449,13 @@ static bool jtag_pio_shift_dma_chunk(const uint8_t *tms_bits,
         return false;
     }
 
+    if (profiling) {
+        stage_start_us = jtag_profile_now_us();
+    }
     jtag_pio_unpack_rx_chunk(bit_count, tdo_bits, source_bit_offset);
+    if (profiling) {
+        jtag_profile_add_tdo_pack_us(jtag_profile_now_us() - stage_start_us);
+    }
     return true;
 }
 

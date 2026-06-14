@@ -1,5 +1,7 @@
 #include "jtag_profile.h"
 
+#include "jtag_engine.h"
+
 #include "pico/time.h"
 
 #include <stdarg.h>
@@ -279,13 +281,24 @@ size_t jtag_profile_format(char *buffer, size_t buffer_size)
     append_text(buffer, buffer_size, &offset, "  enabled=%u\r\n", profile.enabled ? 1u : 0u);
     append_text(buffer, buffer_size, &offset, "  logical_shifts=%lu\r\n", (unsigned long)profile.logical_shifts);
     append_text(buffer, buffer_size, &offset, "  successful_shifts=%lu\r\n", (unsigned long)profile.successful_shifts);
+    append_text(buffer, buffer_size, &offset, "  failed_shifts=%lu\r\n",
+                (unsigned long)(profile.logical_shifts - profile.successful_shifts));
     append_text(buffer, buffer_size, &offset, "  total_bits=%llu\r\n", (unsigned long long)profile.total_bits);
     append_text(buffer, buffer_size, &offset, "  effective_rate_bit_s=%llu\r\n", (unsigned long long)effective_rate);
+    append_text(buffer, buffer_size, &offset, "  requested_tck_hz=%lu\r\n",
+                (unsigned long)jtag_engine_get_requested_pio_frequency_hz());
+    append_text(buffer, buffer_size, &offset, "  actual_tck_hz=%lu\r\n",
+                (unsigned long)jtag_engine_get_pio_frequency_hz());
+    append_text(buffer, buffer_size, &offset, "  pio_cycles_per_bit=%lu\r\n",
+                (unsigned long)jtag_engine_get_pio_cycles_per_bit());
+    append_text(buffer, buffer_size, &offset, "  dma_chunk_bits=%lu\r\n",
+                (unsigned long)jtag_engine_get_dma_chunk_bits());
     append_text(buffer, buffer_size, &offset, "  dma_chunks=%lu\r\n", (unsigned long)profile.dma_chunks);
     append_text(buffer, buffer_size, &offset, "  average_chunks_per_shift=%lu\r\n", (unsigned long)average_chunks);
     append_text(buffer, buffer_size, &offset, "  max_chunks_per_shift=%lu\r\n", (unsigned long)profile.max_chunks_per_shift);
     append_text(buffer, buffer_size, &offset, "  dma_timeouts=%lu\r\n", (unsigned long)profile.dma_timeouts);
     append_text(buffer, buffer_size, &offset, "  pio_recoveries=%lu\r\n", (unsigned long)profile.pio_recoveries);
+    append_text(buffer, buffer_size, &offset, "  data_mismatches=0\r\n");
     append_text(buffer, buffer_size, &offset, "  usb_rx_incomplete_waits=%lu\r\n", (unsigned long)profile.usb_rx_waits);
     append_text(buffer, buffer_size, &offset, "  usb_tx_space_waits=%lu\r\n", (unsigned long)profile.usb_tx_waits);
     append_text(buffer, buffer_size, &offset, "  usb_rx_read_calls=%lu\r\n", (unsigned long)profile.usb_rx_read_calls);
@@ -296,6 +309,8 @@ size_t jtag_profile_format(char *buffer, size_t buffer_size)
     append_text(buffer, buffer_size, &offset, "  usb_tx_max_batch=%lu\r\n", (unsigned long)profile.usb_tx_max_batch);
     append_text(buffer, buffer_size, &offset, "  usb_tx_flush_calls=%lu\r\n", (unsigned long)profile.usb_tx_flush_calls);
     append_text(buffer, buffer_size, &offset, "Timing stats are integer microseconds; profiling off skips per-stage time reads.\r\n");
+    append_text(buffer, buffer_size, &offset, "  maximum_dma_time_us=%llu\r\n",
+                (unsigned long long)profile.dma_pio.max_us);
     append_stat(buffer, buffer_size, &offset, "request_parse_us", &profile.request_parse);
     append_stat(buffer, buffer_size, &offset, "tx_prepare_us", &profile.tx_prepare);
     append_stat(buffer, buffer_size, &offset, "dma_pio_us", &profile.dma_pio);

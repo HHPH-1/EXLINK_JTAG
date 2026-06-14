@@ -20,11 +20,14 @@ MAX_SHIFT_BITS = 131072
 ENGINE_NAMES = {
     0: "bitbang",
     1: "pio",
+    2: "pio_fast",
 }
 ENGINE_VALUES = {value: key for key, value in ENGINE_NAMES.items()}
+ENGINE_VALUES["pio_safe"] = 1
 JTAG_ENGINE_FLAG_BITBANG = 1 << 0
 JTAG_ENGINE_FLAG_PIO = 1 << 1
 JTAG_ENGINE_FLAG_DMA = 1 << 2
+JTAG_ENGINE_FLAG_PIO_FAST = 1 << 3
 PROFILE_ACTIONS = {
     "show": 0,
     "clear": 1,
@@ -101,6 +104,15 @@ class ExlinkJtagBridge:
         length = struct.unpack("<H", self.read_exact(2))[0]
         return self.read_exact(length).decode("ascii", errors="replace")
 
+    def info_dict(self) -> dict[str, str]:
+        values: dict[str, str] = {}
+        for line in self.info().splitlines():
+            if ":" not in line:
+                continue
+            key, value = line.split(":", 1)
+            values[key.strip()] = value.strip()
+        return values
+
     def reset_tap(self) -> None:
         self.write_all(b"T")
         self.expect_error_or(b"t")
@@ -124,6 +136,15 @@ class ExlinkJtagBridge:
         actual = struct.unpack("<I", self.read_exact(4))[0]
         if status != 0:
             raise BridgeError(f"PIO clock request rejected; current PIO TCK is {actual} Hz")
+        return actual
+
+    def set_dma_chunk_bits(self, chunk_bits: int) -> int:
+        self.write_all(b"D" + struct.pack("<I", chunk_bits))
+        self.expect_error_or(b"d")
+        status = self.read_exact(1)[0]
+        actual = struct.unpack("<I", self.read_exact(4))[0]
+        if status != 0:
+            raise BridgeError(f"DMA chunk request rejected; current chunk is {actual} bits")
         return actual
 
     def capabilities(self) -> Tuple[int, int, int]:
@@ -243,6 +264,8 @@ def supported_engine_names(flags: int) -> List[str]:
         names.append("pio")
     if flags & JTAG_ENGINE_FLAG_DMA:
         names.append("dma")
+    if flags & JTAG_ENGINE_FLAG_PIO_FAST:
+        names.append("pio_fast")
     return names
 
 
@@ -294,6 +317,8 @@ def cmd_capabilities(bridge: ExlinkJtagBridge, _args: argparse.Namespace) -> Non
     print(f"Active engine: {engine_name(active)}")
     print(f"Supported engines: {', '.join(names) if names else 'none'}")
     print(f"Maximum shift: {max_shift_bits} bits")
+    for key, value in bridge.info_dict().items():
+        print(f"{key}: {value}")
 
 
 def cmd_profile(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
@@ -304,6 +329,11 @@ def cmd_profile(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
 def cmd_engine(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
     active = bridge.select_engine(args.engine)
     print(f"PASS: active engine is {engine_name(active)}")
+
+
+def cmd_dma_chunk(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
+    actual = bridge.set_dma_chunk_bits(args.bits)
+    print(f"PASS: DMA chunk set to {actual} bits")
 
 
 def cmd_loopback(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
@@ -432,6 +462,11 @@ def build_parser() -> argparse.ArgumentParser:
     engine_parser.add_argument("engine", choices=sorted(ENGINE_VALUES))
     engine_parser.set_defaults(func=cmd_engine)
 
+    dma_chunk_parser = subparsers.add_parser("dma-chunk")
+    dma_chunk_parser.add_argument("--bits", type=int, required=True,
+                                  choices=[2048, 4096, 8192, 16384, 32768])
+    dma_chunk_parser.set_defaults(func=cmd_dma_chunk)
+
     reset_parser = subparsers.add_parser("reset")
     reset_parser.set_defaults(func=cmd_reset)
 
@@ -481,8 +516,8 @@ def main() -> int:
         parser.error("--count must be greater than zero")
     if hasattr(args, "progress") and args.progress < 0:
         parser.error("--progress must be zero or greater")
-    if hasattr(args, "khz") and (args.khz < 50 or args.khz > 5000):
-        parser.error("--khz must be 50..5000")
+    if hasattr(args, "khz") and args.khz < 50:
+        parser.error("--khz must be at least 50")
 
     bridge = ExlinkJtagBridge(args.port, args.baudrate, args.timeout)
     try:

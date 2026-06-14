@@ -61,7 +61,7 @@ target_link_libraries(
 )
 
 if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
-    add_executable(exlink_jtag_bridge
+    set(EXLINK_JTAG_BRIDGE_SOURCES
         exlink_jtag_bridge/main.c
         exlink_jtag_bridge/jtag_engine.c
         exlink_jtag_bridge/jtag_gpio.c
@@ -71,6 +71,7 @@ if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
         exlink_jtag_bridge/usb_cdc_transport.c
     )
 
+    add_executable(exlink_jtag_bridge ${EXLINK_JTAG_BRIDGE_SOURCES})
     target_compile_definitions(exlink_jtag_bridge PRIVATE
         SIGROK_BOARD_EXLINK=1
         EXLINK_JTAG_DEBUG=0
@@ -103,4 +104,31 @@ if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
     pico_enable_stdio_usb(exlink_jtag_bridge 1)
     pico_enable_stdio_uart(exlink_jtag_bridge 0)
     pico_add_extra_outputs(exlink_jtag_bridge)
+
+    add_executable(exlink_jtag_maxspeed ${EXLINK_JTAG_BRIDGE_SOURCES})
+    target_compile_definitions(exlink_jtag_maxspeed PRIVATE
+        SIGROK_BOARD_EXLINK=1
+        EXLINK_JTAG_DEBUG=0
+        EXLINK_JTAG_PERFORMANCE_MODE=1
+        EXLINK_JTAG_MAX_DMA_CHUNK_BITS=32768
+        CFG_TUD_CDC_RX_BUFSIZE=8192
+        CFG_TUD_CDC_TX_BUFSIZE=8192
+    )
+    target_include_directories(exlink_jtag_maxspeed PRIVATE
+        ${CMAKE_CURRENT_LIST_DIR}
+        ${CMAKE_CURRENT_LIST_DIR}/boards
+        ${CMAKE_CURRENT_LIST_DIR}/exlink_jtag_bridge
+    )
+    target_link_libraries(exlink_jtag_maxspeed
+        pico_stdlib
+        pico_stdio_usb
+        hardware_clocks
+        hardware_dma
+        hardware_gpio
+        hardware_pio
+        hardware_sync
+    )
+    pico_enable_stdio_usb(exlink_jtag_maxspeed 1)
+    pico_enable_stdio_uart(exlink_jtag_maxspeed 0)
+    pico_add_extra_outputs(exlink_jtag_maxspeed)
 endif()

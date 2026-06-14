@@ -3,11 +3,13 @@
 #include "jtag_engine.h"
 #include "jtag_profile.h"
 #include "usb_cdc_transport.h"
+#include "hardware/clocks.h"
 #include "tusb.h"
 
 #include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <string.h>
 
 #define USB_IO_TIMEOUT_MS 1000u
@@ -25,11 +27,13 @@
 #define ERROR_INVALID_COMMAND 1u
 #define ERROR_TIMEOUT         2u
 #define PROFILE_TEXT_BUFFER_BYTES 4096u
+#define INFO_TEXT_BUFFER_BYTES 1024u
 
 static uint8_t tms_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static uint8_t tdi_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static uint8_t tdo_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static char profile_text_buffer[PROFILE_TEXT_BUFFER_BYTES];
+static char info_text_buffer[INFO_TEXT_BUFFER_BYTES];
 
 static void put_u16_le(uint8_t *buffer, uint16_t value)
 {
@@ -107,13 +111,63 @@ static bool write_profile_response(uint8_t status, const char *text, uint16_t le
 
 static void handle_info(void)
 {
-    static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.3";
+    const char *active_engine = "bitbang";
+    switch (jtag_engine_get_active()) {
+    case JTAG_ENGINE_PIO:
+        active_engine = "pio_safe";
+        break;
+    case JTAG_ENGINE_PIO_FAST:
+        active_engine = "pio_fast";
+        break;
+    case JTAG_ENGINE_BITBANG:
+    default:
+        active_engine = "bitbang";
+        break;
+    }
+
+    int wrote = snprintf(info_text_buffer,
+                         sizeof(info_text_buffer),
+                         "Firmware version: EXLINK-RP2040-JTAG-MAXSPEED v0.4\r\n"
+                         "Protocol version: 4\r\n"
+                         "xosc_hz: %lu\r\n"
+                         "clk_sys_hz: %lu\r\n"
+                         "clk_usb_hz: %lu\r\n"
+                         "Active engine: %s\r\n"
+                         "PIO cycles per bit: %lu\r\n"
+                         "Minimum TCK: %lu\r\n"
+                         "Maximum theoretical TCK: %lu\r\n"
+                         "Maximum allowed TCK: %lu\r\n"
+                         "Requested TCK: %lu\r\n"
+                         "Actual TCK: %lu\r\n"
+                         "DMA chunk bits: %lu\r\n"
+                         "Maximum DMA chunk bits: %lu\r\n"
+                         "Maximum Shift bits: %lu\r\n",
+                         (unsigned long)clock_get_hz(clk_ref),
+                         (unsigned long)clock_get_hz(clk_sys),
+                         (unsigned long)clock_get_hz(clk_usb),
+                         active_engine,
+                         (unsigned long)jtag_engine_get_pio_cycles_per_bit(),
+                         (unsigned long)JTAG_ENGINE_MIN_PIO_TCK_HZ,
+                         (unsigned long)jtag_engine_get_maximum_pio_frequency_hz(),
+                         (unsigned long)jtag_engine_get_maximum_pio_frequency_hz(),
+                         (unsigned long)jtag_engine_get_requested_pio_frequency_hz(),
+                         (unsigned long)jtag_engine_get_pio_frequency_hz(),
+                         (unsigned long)jtag_engine_get_dma_chunk_bits(),
+                         (unsigned long)jtag_engine_get_max_dma_chunk_bits(),
+                         (unsigned long)EXLINK_JTAG_MAX_SHIFT_BITS);
+    if (wrote < 0) {
+        wrote = 0;
+    }
+    if ((size_t)wrote >= sizeof(info_text_buffer)) {
+        wrote = (int)sizeof(info_text_buffer) - 1;
+    }
+
     uint8_t header[3];
     header[0] = 'i';
-    put_u16_le(&header[1], (uint16_t)(sizeof(info) - 1u));
+    put_u16_le(&header[1], (uint16_t)wrote);
 
     (void)usb_cdc_write_all(header, sizeof(header), USB_IO_TIMEOUT_MS);
-    (void)usb_cdc_write_all((const uint8_t *)info, sizeof(info) - 1u, USB_IO_TIMEOUT_MS);
+    (void)usb_cdc_write_all((const uint8_t *)info_text_buffer, (size_t)wrote, USB_IO_TIMEOUT_MS);
 }
 
 static void handle_reset(void)
@@ -247,7 +301,7 @@ static void handle_engine_select(void)
         return;
     }
 
-    if (engine > (uint8_t)JTAG_ENGINE_PIO) {
+    if (engine > (uint8_t)JTAG_ENGINE_PIO_FAST) {
         (void)write_engine_status(ENGINE_STATUS_BAD_PARAM);
         return;
     }
@@ -259,6 +313,28 @@ static void handle_engine_select(void)
     }
 
     (void)write_engine_status(status);
+}
+
+static void handle_dma_chunk(void)
+{
+    uint8_t value_buffer[4];
+    uint8_t response[6];
+
+    if (!usb_cdc_read_exact(value_buffer, sizeof(value_buffer), USB_IO_TIMEOUT_MS)) {
+        (void)write_error(ERROR_TIMEOUT);
+        return;
+    }
+
+    uint32_t requested = get_u32_le(value_buffer);
+    uint8_t status = RESP_STATUS_OK;
+    if (!jtag_engine_set_dma_chunk_bits(requested)) {
+        status = RESP_STATUS_BAD_LEN;
+    }
+
+    response[0] = 'd';
+    response[1] = status;
+    put_u32_le(&response[2], jtag_engine_get_dma_chunk_bits());
+    (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
 }
 
 static void handle_capabilities(void)
@@ -348,6 +424,9 @@ void jtag_protocol_task(void)
         break;
     case 'R':
         handle_profile();
+        break;
+    case 'D':
+        handle_dma_chunk();
         break;
     default:
         (void)write_error(ERROR_INVALID_COMMAND);

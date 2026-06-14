@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass, field
+import json
 import socket
 import struct
 import sys
@@ -22,7 +23,7 @@ from exlink_jtag_test import (
 
 
 MIN_PIO_TCK_HZ = 50_000
-MAX_PIO_TCK_HZ = 5_000_000
+DEFAULT_MAX_PIO_TCK_HZ = 100_000_000
 DEFAULT_LOGICAL_SHIFT_LIMIT_BITS = 16 * 1024 * 1024
 XVC_COMMANDS = (b"getinfo:", b"settck:", b"shift:")
 PERF_FIELDS = (
@@ -57,6 +58,21 @@ class ClientDisconnected(ConnectionError):
 
 class ProtocolError(RuntimeError):
     pass
+
+
+class Tee:
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, data: str) -> int:
+        for stream in self.streams:
+            stream.write(data)
+            stream.flush()
+        return len(data)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
 
 
 @dataclass
@@ -132,6 +148,14 @@ class SessionStats:
     serial_shift_subrequest_count: int = 0
     maximum_subrequests_per_shift: int = 0
     unaligned_subrequest_count: int = 0
+    requested_tck_hz: int = 0
+    actual_tck_hz: int = 0
+    engine: str = ""
+    pio_cycles_per_bit: int = 0
+    dma_chunk_bits: int = 0
+    dma_timeouts: int = 0
+    pio_recoveries: int = 0
+    usb_disconnects: int = 0
 
     def record_shift(self, bit_count: int) -> None:
         self.shift_request_count += 1
@@ -167,6 +191,25 @@ class SessionStats:
         if elapsed <= 0.0:
             return 0.0
         return self.total_shifted_bits / elapsed
+
+    def to_summary_dict(self) -> dict[str, object]:
+        return {
+            "client": self.client_address,
+            "session_index": self.session_index,
+            "requested_tck_hz": self.requested_tck_hz,
+            "actual_tck_hz": self.actual_tck_hz,
+            "engine": self.engine,
+            "pio_cycles_per_bit": self.pio_cycles_per_bit,
+            "dma_chunk_bits": self.dma_chunk_bits,
+            "shift_requests": self.shift_request_count,
+            "total_shifted_bits": self.total_shifted_bits,
+            "effective_rate_bit_s": self.effective_rate(),
+            "serial_timeouts": self.serial_timeout_count,
+            "protocol_errors": self.protocol_error_count,
+            "dma_timeouts": self.dma_timeouts,
+            "pio_recoveries": self.pio_recoveries,
+            "usb_disconnects": self.usb_disconnects,
+        }
 
 
 def recv_exact(sock: socket.socket, length: int) -> bytes:
@@ -270,14 +313,14 @@ def paste_bits(dst: bytearray, dst_offset: int, src: bytes, bit_count: int) -> N
     dst[:] = merged.to_bytes(len(dst), "little")
 
 
-def period_ns_to_supported_hz(period_ns: int) -> int:
+def period_ns_to_supported_hz(period_ns: int, maximum_hz: int) -> int:
     requested_hz = period_ns_to_hz(period_ns)
-    return min(MAX_PIO_TCK_HZ, max(MIN_PIO_TCK_HZ, requested_hz))
+    return min(maximum_hz, max(MIN_PIO_TCK_HZ, requested_hz))
 
 
 def period_ns_to_hz(period_ns: int) -> int:
     if period_ns == 0:
-        return MAX_PIO_TCK_HZ
+        return DEFAULT_MAX_PIO_TCK_HZ
     return 1_000_000_000 // period_ns
 
 
@@ -296,8 +339,13 @@ def print_session_summary(stats: SessionStats) -> None:
     print(f"  Total accepted clients: {stats.total_accepted_clients}")
     print(f"  getinfo: {stats.getinfo_count}")
     print(f"  settck: {stats.settck_count}")
+    print(f"  Requested TCK: {stats.requested_tck_hz} Hz")
+    print(f"  Actual TCK: {stats.actual_tck_hz} Hz")
+    print(f"  Engine: {stats.engine}")
+    print(f"  PIO cycles per bit: {stats.pio_cycles_per_bit}")
+    print(f"  DMA chunk: {stats.dma_chunk_bits} bits")
     print(f"  Shift requests: {stats.shift_request_count}")
-    print(f"  Total bits: {stats.total_shifted_bits}")
+    print(f"  Total shifted bits: {stats.total_shifted_bits}")
     print(f"  Minimum shift: {stats.minimum_shift_bits or 0}")
     print(f"  Maximum shift: {stats.maximum_shift_bits}")
     print(f"  Average shift: {stats.average_shift_bits():.0f}")
@@ -305,6 +353,9 @@ def print_session_summary(stats: SessionStats) -> None:
     print(f"  Effective rate: {stats.effective_rate():.0f} bit/s")
     print(f"  Serial timeouts: {stats.serial_timeout_count}")
     print(f"  Protocol errors: {stats.protocol_error_count}")
+    print(f"  DMA timeouts: {stats.dma_timeouts}")
+    print(f"  PIO recoveries: {stats.pio_recoveries}")
+    print(f"  USB disconnects: {stats.usb_disconnects}")
     print(f"  Client reconnects: {stats.reconnect_count}")
     print(f"  Errors: {errors}")
     print_performance_summary(stats)
@@ -478,6 +529,11 @@ def handle_client(
         session_index=state.total_accepted_clients,
         total_accepted_clients=state.total_accepted_clients,
         reconnect_count=max(state.total_accepted_clients - 1, 0),
+        requested_tck_hz=getattr(args, "requested_pio_tck_hz", 0),
+        actual_tck_hz=getattr(args, "actual_pio_tck_hz", 0),
+        engine=getattr(args, "active_engine_name", ""),
+        pio_cycles_per_bit=getattr(args, "pio_cycles_per_bit", 0),
+        dma_chunk_bits=getattr(args, "actual_dma_chunk_bits", 0),
     )
     recovery_required = False
     print(f"XVC client connected: {client_address}")
@@ -495,13 +551,22 @@ def handle_client(
                 stats.settck_count += 1
                 requested_ns = struct.unpack("<I", recv_exact(sock, 4))[0]
                 requested_hz = period_ns_to_hz(requested_ns)
-                supported_hz = period_ns_to_supported_hz(requested_ns)
-                firmware_actual_hz = bridge.set_pio_clock_hz(supported_hz)
+                if args.force_tck_khz is not None:
+                    supported_hz = args.force_tck_khz * 1000
+                    firmware_actual_hz = args.actual_pio_tck_hz
+                else:
+                    supported_hz = period_ns_to_supported_hz(requested_ns, args.maximum_pio_tck_hz)
+                    firmware_actual_hz = bridge.set_pio_clock_hz(supported_hz)
+                    args.requested_pio_tck_hz = supported_hz
+                    args.actual_pio_tck_hz = firmware_actual_hz
+                    stats.requested_tck_hz = supported_hz
+                    stats.actual_tck_hz = firmware_actual_hz
                 actual_ns = hz_to_period_ns(firmware_actual_hz, requested_ns)
                 actual_hz = period_ns_to_hz(actual_ns)
                 print(
                     "settck: "
                     f"requested={requested_ns} ns ({requested_hz} Hz), "
+                    f"firmware_requested={supported_hz} Hz, "
                     f"actual={actual_ns} ns ({actual_hz} Hz)"
                 )
                 sock.sendall(struct.pack("<I", actual_ns))
@@ -565,10 +630,27 @@ def handle_client(
     except OSError as exc:
         print(f"Client socket closed: {exc}")
     finally:
+        if args.profile:
+            try:
+                _enabled, profile_text = bridge.profile("show")
+                for line in profile_text.splitlines():
+                    if line.strip().startswith("dma_timeouts="):
+                        stats.dma_timeouts = int(line.split("=", 1)[1])
+                    elif line.strip().startswith("pio_recoveries="):
+                        stats.pio_recoveries = int(line.split("=", 1)[1])
+            except BridgeError as exc:
+                print(f"Profile read failed: {exc}")
         if recovery_required:
             recover_bridge(bridge)
         if not args.no_stats:
             print_session_summary(stats)
+        if args.json_summary:
+            summary_json = json.dumps(stats.to_summary_dict(), sort_keys=True)
+            if args.json_summary == "-":
+                print(summary_json)
+            else:
+                with open(args.json_summary, "a", encoding="utf-8") as f:
+                    f.write(summary_json + "\n")
         print("Waiting for XVC client...")
 
 
@@ -583,12 +665,26 @@ def initialize_bridge(args: argparse.Namespace) -> tuple[ExlinkJtagBridge, str, 
         if not (supported & JTAG_ENGINE_FLAG_PIO):
             raise BridgeError("firmware does not report PIO engine support")
 
-        if ENGINE_NAMES.get(active) != "pio":
-            bridge.select_engine("pio")
+        requested_engine = "pio_fast" if args.engine == "pio_fast" else "pio"
+        if ENGINE_NAMES.get(active) != requested_engine:
+            bridge.select_engine(requested_engine)
             active, supported, firmware_max_shift_bits = bridge.capabilities()
 
-        requested_hz = args.default_tck_khz * 1000
+        if args.dma_chunk_bits:
+            args.actual_dma_chunk_bits = bridge.set_dma_chunk_bits(args.dma_chunk_bits)
+
+        requested_hz = (args.force_tck_khz or args.default_tck_khz) * 1000
         actual_pio_tck_hz = bridge.set_pio_clock_hz(requested_hz)
+        if args.profile:
+            bridge.profile("clear")
+            bridge.profile("on")
+        info_values = bridge.info_dict()
+        args.maximum_pio_tck_hz = int(info_values.get("Maximum theoretical TCK", DEFAULT_MAX_PIO_TCK_HZ))
+        args.pio_cycles_per_bit = int(info_values.get("PIO cycles per bit", 0))
+        args.actual_dma_chunk_bits = int(info_values.get("DMA chunk bits", getattr(args, "actual_dma_chunk_bits", 0)))
+        args.active_engine_name = info_values.get("Active engine", requested_engine)
+        args.requested_pio_tck_hz = requested_hz
+        args.actual_pio_tck_hz = actual_pio_tck_hz
         dma_enabled = bool(supported & JTAG_ENGINE_FLAG_DMA)
         return bridge, firmware_info, firmware_max_shift_bits, dma_enabled, actual_pio_tck_hz
     except Exception:
@@ -609,9 +705,13 @@ def serve(args: argparse.Namespace) -> None:
         print("Exlink XVC Server")
         print(f"Firmware: {firmware_info}")
         print(f"Serial port: {args.port}")
-        print("Engine: pio")
+        print(f"Engine: {args.active_engine_name}")
         print(f"DMA: {'enabled' if dma_enabled else 'disabled'}")
+        print(f"DMA chunk: {args.actual_dma_chunk_bits} bits")
         print(f"Maximum shift: {firmware_max_shift_bits} bits")
+        print(f"Maximum theoretical TCK: {args.maximum_pio_tck_hz / 1000:.0f} kHz")
+        if args.force_tck_khz is not None:
+            print(f"Force TCK: {args.force_tck_khz} kHz")
         print(f"PIO TCK: {actual_pio_tck_hz / 1000:.0f} kHz")
 
         server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -652,6 +752,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--xvc-port", "--tcp-port", dest="xvc_port", type=int, default=2542)
     parser.add_argument("--socket-timeout", type=float, default=10.0)
     parser.add_argument("--default-tck-khz", type=int, default=1000)
+    parser.add_argument("--force-tck-khz", type=int, help="hold firmware TCK at this value despite Vivado settck requests")
+    parser.add_argument("--engine", choices=["pio", "pio_safe", "pio_fast"], default="pio")
+    parser.add_argument("--dma-chunk-bits", type=int, choices=[2048, 4096, 8192, 16384, 32768])
+    parser.add_argument("--profile", action="store_true", help="enable firmware profile for this XVC session")
+    parser.add_argument("--json-summary", nargs="?", const="-", help="write a JSON session summary to this file or stdout")
+    parser.add_argument("--log-file", help="tee server stdout/stderr to this file")
     parser.add_argument("--max-logical-shift-bits", type=int, default=DEFAULT_LOGICAL_SHIFT_LIMIT_BITS)
     parser.add_argument("--log-shifts", action="store_true", help="log each XVC shift without payload bytes")
     parser.add_argument("--verbose-bits", action="store_true", help="log each XVC shift with TMS/TDI/TDO hex")
@@ -663,12 +769,27 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    if args.default_tck_khz < (MIN_PIO_TCK_HZ // 1000) or args.default_tck_khz > (MAX_PIO_TCK_HZ // 1000):
-        parser.error(f"--default-tck-khz must be {MIN_PIO_TCK_HZ // 1000}..{MAX_PIO_TCK_HZ // 1000}")
+    if args.default_tck_khz < (MIN_PIO_TCK_HZ // 1000):
+        parser.error(f"--default-tck-khz must be at least {MIN_PIO_TCK_HZ // 1000}")
+    if args.force_tck_khz is not None and args.force_tck_khz < (MIN_PIO_TCK_HZ // 1000):
+        parser.error(f"--force-tck-khz must be at least {MIN_PIO_TCK_HZ // 1000}")
     if args.max_logical_shift_bits <= 0:
         parser.error("--max-logical-shift-bits must be greater than zero")
 
-    serve(args)
+    log_handle = None
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    try:
+        if args.log_file:
+            log_handle = open(args.log_file, "a", encoding="utf-8")
+            sys.stdout = Tee(original_stdout, log_handle)
+            sys.stderr = Tee(original_stderr, log_handle)
+        serve(args)
+    finally:
+        sys.stdout = original_stdout
+        sys.stderr = original_stderr
+        if log_handle is not None:
+            log_handle.close()
     return 0
 
 

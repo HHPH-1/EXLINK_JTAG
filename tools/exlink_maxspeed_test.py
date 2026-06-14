@@ -110,7 +110,7 @@ def idcodes_consistent(values: Iterable[int]) -> bool:
 def parse_vivado_program_output(text: str) -> list[ProgramRun]:
     runs: list[ProgramRun] = []
     pattern = re.compile(
-        r"EXLINK_PROGRAM\s+run=(?P<run>\d+)\s+type=(?P<type>\S+)\s+"
+        r"^EXLINK_PROGRAM\s+run=(?P<run>\d+)\s+type=(?P<type>\S+)\s+"
         r"status=(?P<status>PASS|FAIL)\s+elapsed_ms=(?P<elapsed>\d+)(?:\s+reason=(?P<reason>.*))?"
     )
     for line in text.splitlines():

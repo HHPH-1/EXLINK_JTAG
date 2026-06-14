@@ -14,6 +14,19 @@ proc exlink_sanitize {text} {
     return $text
 }
 
+proc exlink_open_xvc_target {xvc_host xvc_port} {
+    set last_err ""
+    for {set attempt 1} {$attempt <= 3} {incr attempt} {
+        if {![catch {open_hw_target -xvc_url ${xvc_host}:${xvc_port}} err]} {
+            return
+        }
+        set last_err $err
+        catch {close_hw_target}
+        after 5000
+    }
+    error $last_err
+}
+
 set bitstream [exlink_arg "-bitstream" ""]
 set xvc_host [exlink_arg "-xvc_host" "localhost"]
 set xvc_port [exlink_arg "-xvc_port" "2542"]
@@ -55,21 +68,23 @@ proc exlink_program_once {device bitstream run_index run_type} {
 
 if {[catch {
     open_hw_manager
-    connect_hw_server
-    open_hw_target -xvc_url ${xvc_host}:${xvc_port}
+    connect_hw_server -allow_non_jtag
+    exlink_open_xvc_target $xvc_host $xvc_port
     set opened 1
     set devices [get_hw_devices]
     if {[llength $devices] == 0} {
         error "no_hw_devices"
     }
-    set programmable {}
-    foreach dev $devices {
-        if {![catch {get_property PROGRAM.FILE $dev}]} {
-            lappend programmable $dev
-        }
-    }
+    set programmable [get_hw_devices xc7z020*]
     if {[llength $programmable] == 0} {
-        set programmable $devices
+        foreach dev $devices {
+            if {![catch {get_property PROGRAM.FILE $dev}]} {
+                lappend programmable $dev
+            }
+        }
+        if {[llength $programmable] == 0} {
+            set programmable $devices
+        }
     }
     if {$device_index >= [llength $programmable]} {
         error "device_index_out_of_range"

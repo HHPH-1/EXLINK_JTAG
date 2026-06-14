@@ -16,7 +16,7 @@ except ImportError as exc:  # pragma: no cover - host dependency hint
     raise SystemExit("pyserial is required: py -m pip install pyserial") from exc
 
 
-MAX_SHIFT_BITS = 4096
+MAX_SHIFT_BITS = 32768
 ENGINE_NAMES = {
     0: "bitbang",
     1: "pio",
@@ -36,10 +36,13 @@ class ExlinkJtagBridge:
         self.serial.close()
 
     def read_exact(self, length: int) -> bytes:
-        data = self.serial.read(length)
-        if len(data) != length:
-            raise BridgeError(f"CDC timeout: expected {length} bytes, got {len(data)}")
-        return data
+        chunks = bytearray()
+        while len(chunks) < length:
+            chunk = self.serial.read(length - len(chunks))
+            if not chunk:
+                raise BridgeError(f"CDC timeout: expected {length} bytes, got {len(chunks)}")
+            chunks.extend(chunk)
+        return bytes(chunks)
 
     def expect_error_or(self, expected_tag: bytes) -> bytes:
         tag = self.read_exact(1)
@@ -72,6 +75,15 @@ class ExlinkJtagBridge:
             raise BridgeError(f"clock request rejected; current half-period is {applied} us")
         return applied
 
+    def set_pio_clock_hz(self, requested_hz: int) -> int:
+        self.serial.write(b"P" + struct.pack("<I", requested_hz))
+        self.expect_error_or(b"p")
+        status = self.read_exact(1)[0]
+        actual = struct.unpack("<I", self.read_exact(4))[0]
+        if status != 0:
+            raise BridgeError(f"PIO clock request rejected; current PIO TCK is {actual} Hz")
+        return actual
+
     def capabilities(self) -> Tuple[int, int, int]:
         self.serial.write(b"Q")
         self.expect_error_or(b"q")
@@ -102,7 +114,8 @@ class ExlinkJtagBridge:
         if len(tms) != byte_count or len(tdi) != byte_count:
             raise ValueError("TMS/TDI payload lengths do not match bit_count")
 
-        self.serial.write(b"S" + struct.pack("<I", bit_count) + tms + tdi)
+        frame = b"S" + struct.pack("<I", bit_count) + tms + tdi
+        self.serial.write(frame)
         self.expect_error_or(b"s")
         status = self.read_exact(1)[0]
         returned_bits = struct.unpack("<I", self.read_exact(4))[0]
@@ -125,6 +138,23 @@ def bits_to_bytes(bits: Iterable[int]) -> bytes:
 
 def get_bit(data: bytes, index: int) -> int:
     return (data[index >> 3] >> (index & 7)) & 1
+
+
+def mask_unused_high_bits(data: bytes | bytearray, bit_count: int) -> bytes:
+    out = bytearray(data)
+    used = bit_count & 7
+    if used and out:
+        out[-1] &= (1 << used) - 1
+    return bytes(out)
+
+
+def random_payload(bit_count: int, rng: random.Random) -> bytes:
+    byte_count = (bit_count + 7) // 8
+    if hasattr(rng, "randbytes"):
+        data = rng.randbytes(byte_count)
+    else:  # pragma: no cover - for older Python builds
+        data = bytes(rng.getrandbits(8) for _ in range(byte_count))
+    return mask_unused_high_bits(data, bit_count)
 
 
 def bytes_to_bit_string(data: bytes, bit_count: int) -> str:
@@ -151,28 +181,33 @@ def engine_name(value: int) -> str:
 
 def supported_engine_names(flags: int) -> List[str]:
     names: List[str] = []
-    for value, name in ENGINE_NAMES.items():
-        if flags & (1 << value):
-            names.append(name)
+    if flags & (1 << 0):
+        names.append("bitbang")
+    if flags & (1 << 1):
+        names.append("pio")
+    if flags & (1 << 2):
+        names.append("dma")
     return names
 
 
 def make_pattern(bit_count: int, pattern: str, seed: int) -> bytes:
+    byte_count = (bit_count + 7) // 8
     if pattern == "zero":
-        return bytes((bit_count + 7) // 8)
+        return bytes(byte_count)
     if pattern == "one":
-        return bits_to_bytes([1] * bit_count)
+        data = bytearray([0xFF] * byte_count)
+        return mask_unused_high_bits(data, bit_count)
     if pattern == "random":
         rng = random.Random(seed)
-        return bits_to_bytes(rng.randrange(2) for _ in range(bit_count))
+        return random_payload(bit_count, rng)
     raise ValueError(f"unknown pattern {pattern!r}")
 
 
 def run_loopback_payload(bridge: ExlinkJtagBridge, bit_count: int, tdi: bytes) -> None:
     tms = bytes((bit_count + 7) // 8)
     tdo = bridge.shift(bit_count, tms, tdi)
-    mismatches = [bit for bit in range(bit_count) if get_bit(tdo, bit) != get_bit(tdi, bit)]
-    if mismatches:
+    if mask_unused_high_bits(tdo, bit_count) != mask_unused_high_bits(tdi, bit_count):
+        mismatches = [bit for bit in range(bit_count) if get_bit(tdo, bit) != get_bit(tdi, bit)]
         preview = ", ".join(str(bit) for bit in mismatches[:16])
         raise BridgeError(f"loopback mismatch at {len(mismatches)} bit(s): {preview}")
 
@@ -191,6 +226,12 @@ def cmd_clock(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
     print(f"PASS: half-period set to {applied} us")
 
 
+def cmd_clock_pio(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
+    requested_hz = args.khz * 1000
+    actual_hz = bridge.set_pio_clock_hz(requested_hz)
+    print(f"PASS: PIO TCK set to {actual_hz} Hz ({actual_hz / 1000:.1f} kHz)")
+
+
 def cmd_capabilities(bridge: ExlinkJtagBridge, _args: argparse.Namespace) -> None:
     active, supported, max_shift_bits = bridge.capabilities()
     names = supported_engine_names(supported)
@@ -206,8 +247,7 @@ def cmd_engine(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
 
 def cmd_loopback(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
-    tdi_bits = [rng.randrange(2) for _ in range(args.bits)]
-    tdi = bits_to_bytes(tdi_bits)
+    tdi = random_payload(args.bits, rng)
     run_loopback_payload(bridge, args.bits, tdi)
 
     print("PASS: TDI->TDO loopback matched")
@@ -216,8 +256,11 @@ def cmd_loopback(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
 
 
 def cmd_boundary_test(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
-    lengths = [1, 2, 3, 4, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
-               127, 128, 129, 255, 256, 257, 4095, 4096]
+    lengths = [1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
+               127, 128, 129, 255, 256, 257, 511, 512, 513,
+               1023, 1024, 1025, 2047, 2048, 2049,
+               4095, 4096, 4097, 8191, 8192, 8193,
+               16383, 16384, 16385, 32767, 32768]
     patterns = ["zero", "one", "random"]
 
     for bit_count in lengths:
@@ -232,20 +275,49 @@ def cmd_boundary_test(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> Non
 
 def cmd_stress(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
+    active, supported, _max_shift_bits = bridge.capabilities()
     start = time.perf_counter()
+    latencies = []
 
     for iteration in range(args.count):
-        payload = bits_to_bytes(rng.randrange(2) for _ in range(args.bits))
+        payload = random_payload(args.bits, rng)
+        request_start = time.perf_counter()
         run_loopback_payload(bridge, args.bits, payload)
+        latencies.append(time.perf_counter() - request_start)
         if args.progress and ((iteration + 1) % args.progress) == 0:
             print(f"PASS: {iteration + 1}/{args.count}")
 
     elapsed = time.perf_counter() - start
     total_bits = args.bits * args.count
     rate = total_bits / elapsed if elapsed > 0 else 0.0
-    print(f"PASS: {args.count} loopback shifts completed")
+    average_latency = sum(latencies) / len(latencies) if latencies else 0.0
+    print("PASS: stress completed")
+    print(f"Engine: {engine_name(active)}")
+    print(f"DMA: {'yes' if supported & (1 << 2) else 'no'}")
+    print(f"Bit count: {args.bits}")
+    print(f"Count: {args.count}")
+    print(f"Total bits: {total_bits}")
     print(f"Total time: {elapsed:.3f} s")
-    print(f"Average effective bit rate: {rate:.0f} bit/s")
+    print(f"Effective bit/s: {rate:.0f}")
+    print(f"Average request latency: {average_latency * 1000:.3f} ms")
+
+
+def cmd_benchmark(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
+    rng = random.Random(args.seed)
+    active, supported, _max_shift_bits = bridge.capabilities()
+    lengths = [128, 512, 4096, 8192, 16384, 32768]
+    print(f"Engine: {engine_name(active)}")
+    print(f"DMA: {'yes' if supported & (1 << 2) else 'no'}")
+    for bit_count in lengths:
+        payloads = [random_payload(bit_count, rng) for _ in range(args.count)]
+        start = time.perf_counter()
+        for payload in payloads:
+            run_loopback_payload(bridge, bit_count, payload)
+        elapsed = time.perf_counter() - start
+        total_bits = bit_count * args.count
+        rate = total_bits / elapsed if elapsed > 0 else 0.0
+        print(f"{bit_count:5d} bits: {rate:10.0f} bit/s over {args.count} runs ({elapsed:.3f} s)")
+    print("PASS: benchmark completed")
 
 
 def cmd_scan(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
@@ -297,7 +369,7 @@ def build_parser() -> argparse.ArgumentParser:
     boundary_parser.set_defaults(func=cmd_boundary_test)
 
     stress_parser = subparsers.add_parser("stress")
-    stress_parser.add_argument("--bits", type=int, default=4096)
+    stress_parser.add_argument("--bits", type=int, default=32768)
     stress_parser.add_argument("--count", type=int, default=1000)
     stress_parser.add_argument("--seed", type=int, default=0x5103)
     stress_parser.add_argument("--progress", type=int, default=100)
@@ -310,6 +382,15 @@ def build_parser() -> argparse.ArgumentParser:
     clock_parser = subparsers.add_parser("clock")
     clock_parser.add_argument("--half-period-us", type=int, required=True)
     clock_parser.set_defaults(func=cmd_clock)
+
+    clock_pio_parser = subparsers.add_parser("clock-pio")
+    clock_pio_parser.add_argument("--khz", type=int, required=True)
+    clock_pio_parser.set_defaults(func=cmd_clock_pio)
+
+    benchmark_parser = subparsers.add_parser("benchmark")
+    benchmark_parser.add_argument("--count", type=int, default=100)
+    benchmark_parser.add_argument("--seed", type=int, default=0xBEE4)
+    benchmark_parser.set_defaults(func=cmd_benchmark)
 
     return parser
 
@@ -324,6 +405,8 @@ def main() -> int:
         parser.error("--count must be greater than zero")
     if hasattr(args, "progress") and args.progress < 0:
         parser.error("--progress must be zero or greater")
+    if hasattr(args, "khz") and (args.khz < 50 or args.khz > 5000):
+        parser.error("--khz must be 50..5000")
 
     bridge = ExlinkJtagBridge(args.port, args.baudrate, args.timeout)
     try:

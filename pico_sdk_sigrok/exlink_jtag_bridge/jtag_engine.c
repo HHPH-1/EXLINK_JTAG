@@ -9,8 +9,8 @@ static bool pio_initialized = false;
 bool jtag_engine_init(void)
 {
     jtag_gpio_init();
-    active_engine = JTAG_ENGINE_BITBANG;
-    pio_initialized = false;
+    pio_initialized = jtag_pio_init();
+    active_engine = pio_initialized ? JTAG_ENGINE_PIO : JTAG_ENGINE_BITBANG;
     return true;
 }
 
@@ -53,7 +53,7 @@ JtagEngineType_t jtag_engine_get_active(void)
 
 uint8_t jtag_engine_get_supported_flags(void)
 {
-    return JTAG_ENGINE_FLAG_BITBANG | JTAG_ENGINE_FLAG_PIO;
+    return JTAG_ENGINE_FLAG_BITBANG | JTAG_ENGINE_FLAG_PIO | JTAG_ENGINE_FLAG_DMA;
 }
 
 void jtag_engine_set_half_period_us(uint32_t half_period_us)
@@ -64,6 +64,16 @@ void jtag_engine_set_half_period_us(uint32_t half_period_us)
 uint32_t jtag_engine_get_half_period_us(void)
 {
     return jtag_get_half_period_us();
+}
+
+bool jtag_engine_set_pio_frequency_hz(uint32_t requested_hz, uint32_t *actual_hz)
+{
+    return jtag_pio_set_frequency_hz(requested_hz, actual_hz);
+}
+
+uint32_t jtag_engine_get_pio_frequency_hz(void)
+{
+    return jtag_pio_get_frequency_hz();
 }
 
 bool jtag_engine_shift_bits(uint32_t bit_count,

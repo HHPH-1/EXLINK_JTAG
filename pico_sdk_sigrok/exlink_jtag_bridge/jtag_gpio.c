@@ -46,7 +46,6 @@ void jtag_gpio_init(void)
     gpio_set_slew_rate(EXLINK_JTAG_TMS_GPIO, GPIO_SLEW_RATE_SLOW);
     gpio_set_slew_rate(EXLINK_JTAG_TDI_GPIO, GPIO_SLEW_RATE_SLOW);
 
-    half_period_us = JTAG_DEFAULT_HALF_PERIOD_US;
 }
 
 void jtag_gpio_deinit(void)

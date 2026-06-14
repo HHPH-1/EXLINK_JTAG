@@ -84,6 +84,7 @@ if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
         pico_stdlib
         pico_stdio_usb
         hardware_clocks
+        hardware_dma
         hardware_gpio
         hardware_pio
         hardware_sync

@@ -4,16 +4,12 @@
 from __future__ import annotations
 
 import argparse
-import math
 import socket
 import struct
 import sys
 import time
 
-from exlink_jtag_test import BridgeError, ExlinkJtagBridge, MAX_SHIFT_BITS, get_bit
-
-
-XVC_INFO = f"xvcServer_v1.0:{MAX_SHIFT_BITS}\n".encode("ascii")
+from exlink_jtag_test import BridgeError, ExlinkJtagBridge, MAX_SHIFT_BITS, mask_unused_high_bits
 
 
 def recv_exact(sock: socket.socket, length: int) -> bytes:
@@ -47,22 +43,36 @@ def recv_command(sock: socket.socket) -> bytes:
 
 
 def copy_bits(src: bytes, src_offset: int, bit_count: int) -> bytes:
-    out = bytearray((bit_count + 7) // 8)
-    for bit in range(bit_count):
-        if get_bit(src, src_offset + bit):
-            out[bit >> 3] |= 1 << (bit & 7)
-    return bytes(out)
+    byte_count = (bit_count + 7) // 8
+    if (src_offset & 7) == 0:
+        start = src_offset >> 3
+        return mask_unused_high_bits(src[start:start + byte_count], bit_count)
+
+    value = int.from_bytes(src, "little") >> src_offset
+    mask = (1 << bit_count) - 1
+    return (value & mask).to_bytes(byte_count, "little")
 
 
 def paste_bits(dst: bytearray, dst_offset: int, src: bytes, bit_count: int) -> None:
-    for bit in range(bit_count):
-        if get_bit(src, bit):
-            dst[(dst_offset + bit) >> 3] |= 1 << ((dst_offset + bit) & 7)
+    byte_count = (bit_count + 7) // 8
+    src = mask_unused_high_bits(src, bit_count)
+    if (dst_offset & 7) == 0:
+        start = dst_offset >> 3
+        dst[start:start + byte_count] = src
+        return
+
+    value = int.from_bytes(src, "little") << dst_offset
+    current = int.from_bytes(dst, "little")
+    mask = ((1 << bit_count) - 1) << dst_offset
+    merged = (current & ~mask) | (value & mask)
+    dst[:] = merged.to_bytes(len(dst), "little")
 
 
-def clamp_half_period(period_ns: int) -> int:
-    half_period_us = int(math.ceil(period_ns / 2000.0))
-    return min(100, max(1, half_period_us))
+def period_ns_to_supported_hz(period_ns: int) -> int:
+    if period_ns == 0:
+        return 5_000_000
+    requested_hz = int(round(1_000_000_000 / period_ns))
+    return min(5_000_000, max(50_000, requested_hz))
 
 
 def handle_client(sock: socket.socket, bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
@@ -73,12 +83,12 @@ def handle_client(sock: socket.socket, bridge: ExlinkJtagBridge, args: argparse.
         command = recv_command(sock)
 
         if command == b"getinfo:":
-            sock.sendall(XVC_INFO)
+            sock.sendall(args.xvc_info)
         elif command == b"settck:":
             requested_ns = struct.unpack("<I", recv_exact(sock, 4))[0]
-            half_period_us = clamp_half_period(requested_ns)
-            applied = bridge.set_clock(half_period_us)
-            actual_ns = applied * 2000
+            requested_hz = period_ns_to_supported_hz(requested_ns)
+            actual_hz = bridge.set_pio_clock_hz(requested_hz)
+            actual_ns = int(round(1_000_000_000 / actual_hz)) if actual_hz else requested_ns
             print(f"settck requested={requested_ns} ns actual={actual_ns} ns")
             sock.sendall(struct.pack("<I", actual_ns))
         elif command == b"shift:":
@@ -91,7 +101,7 @@ def handle_client(sock: socket.socket, bridge: ExlinkJtagBridge, args: argparse.
             offset = 0
             chunks = 0
             while offset < bit_count:
-                chunk_bits = min(MAX_SHIFT_BITS, bit_count - offset)
+                chunk_bits = min(args.max_shift_bits, bit_count - offset)
                 chunk_tms = copy_bits(tms, offset, chunk_bits)
                 chunk_tdi = copy_bits(tdi, offset, chunk_bits)
                 chunk_tdo = bridge.shift(chunk_bits, chunk_tms, chunk_tdi)
@@ -111,6 +121,13 @@ def serve(args: argparse.Namespace) -> None:
     try:
         print(f"CDC serial open: {args.port}")
         print(f"Bridge info: {bridge.info()}")
+        active = bridge.select_engine("pio")
+        print(f"Active engine: {active} (pio)")
+        _active, _supported, max_shift_bits = bridge.capabilities()
+        args.max_shift_bits = min(MAX_SHIFT_BITS, max_shift_bits)
+        args.xvc_info = f"xvcServer_v1.0:{args.max_shift_bits}\n".encode("ascii")
+        if args.max_shift_bits != MAX_SHIFT_BITS:
+            print(f"warning: firmware max shift is {max_shift_bits}, local client uses {args.max_shift_bits}")
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
             server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             server.bind((args.xvc_host, args.xvc_port))
@@ -119,6 +136,7 @@ def serve(args: argparse.Namespace) -> None:
 
             while True:
                 client, _addr = server.accept()
+                client.settimeout(args.socket_timeout)
                 with client:
                     try:
                         handle_client(client, bridge, args)
@@ -136,6 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--timeout", type=float, default=2.0)
     parser.add_argument("--xvc-host", default="127.0.0.1")
     parser.add_argument("--xvc-port", type=int, default=2542)
+    parser.add_argument("--socket-timeout", type=float, default=10.0)
     parser.add_argument("--verbose-bits", action="store_true")
     return parser
 

@@ -85,7 +85,7 @@ static bool write_engine_status(uint8_t status)
 
 static void handle_info(void)
 {
-    static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.2";
+    static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.3";
     uint8_t header[3];
     header[0] = 'i';
     put_u16_le(&header[1], (uint16_t)(sizeof(info) - 1u));
@@ -156,6 +156,31 @@ static void handle_clock(void)
     (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
 }
 
+static void handle_pio_clock(void)
+{
+    uint8_t value_buffer[4];
+    uint8_t response[6];
+
+    if (!usb_cdc_read_exact(value_buffer, sizeof(value_buffer), USB_IO_TIMEOUT_MS)) {
+        (void)write_error(ERROR_TIMEOUT);
+        return;
+    }
+
+    uint32_t requested = get_u32_le(value_buffer);
+    uint32_t actual = 0u;
+    uint8_t status = RESP_STATUS_OK;
+
+    if (!jtag_engine_set_pio_frequency_hz(requested, &actual)) {
+        status = RESP_STATUS_BAD_LEN;
+        actual = jtag_engine_get_pio_frequency_hz();
+    }
+
+    response[0] = 'p';
+    response[1] = status;
+    put_u32_le(&response[2], actual);
+    (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
+}
+
 static void handle_engine_select(void)
 {
     uint8_t engine = 0u;
@@ -222,6 +247,9 @@ void jtag_protocol_task(void)
         break;
     case 'K':
         handle_clock();
+        break;
+    case 'P':
+        handle_pio_clock();
         break;
     case 'M':
         handle_engine_select();

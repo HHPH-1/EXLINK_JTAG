@@ -23,6 +23,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 17)
 option(SIGROK_BOARD_EXLINK "Build firmware for the Exlink RP2040 board" OFF)
 option(EXLINK_BUILD_JTAG_BRIDGE "Build standalone Exlink RP2040 JTAG bridge" OFF)
+set(EXLINK_JTAG_PERFORMANCE_MODE "1" CACHE STRING "Enable Exlink JTAG Stage 5.6 performance defaults")
 #See https://github.com/pico-coder/sigrok-pico/pull/63/  
 #setting this allows the DTR to be ignored.  In addition to this, the use of 
 #tud_cdc_connected should be replaced with tud_ready.
@@ -73,7 +74,15 @@ if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
     target_compile_definitions(exlink_jtag_bridge PRIVATE
         SIGROK_BOARD_EXLINK=1
         EXLINK_JTAG_DEBUG=0
+        EXLINK_JTAG_PERFORMANCE_MODE=${EXLINK_JTAG_PERFORMANCE_MODE}
     )
+
+    if(EXLINK_JTAG_PERFORMANCE_MODE)
+        target_compile_definitions(exlink_jtag_bridge PRIVATE
+            CFG_TUD_CDC_RX_BUFSIZE=8192
+            CFG_TUD_CDC_TX_BUFSIZE=8192
+        )
+    endif()
 
     target_include_directories(exlink_jtag_bridge PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}

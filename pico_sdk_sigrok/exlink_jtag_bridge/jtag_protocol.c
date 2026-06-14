@@ -24,7 +24,7 @@
 
 #define ERROR_INVALID_COMMAND 1u
 #define ERROR_TIMEOUT         2u
-#define PROFILE_TEXT_BUFFER_BYTES 2048u
+#define PROFILE_TEXT_BUFFER_BYTES 4096u
 
 static uint8_t tms_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];
 static uint8_t tdi_buffer[EXLINK_JTAG_MAX_SHIFT_BYTES];

@@ -31,6 +31,13 @@ typedef struct {
     uint32_t pio_recoveries;
     uint32_t usb_rx_waits;
     uint32_t usb_tx_waits;
+    uint32_t usb_rx_read_calls;
+    uint64_t usb_rx_bytes;
+    uint32_t usb_rx_max_batch;
+    uint32_t usb_tx_write_calls;
+    uint64_t usb_tx_bytes;
+    uint32_t usb_tx_max_batch;
+    uint32_t usb_tx_flush_calls;
 
     ProfileTimeStat_t request_parse;
     ProfileTimeStat_t tx_prepare;
@@ -147,6 +154,35 @@ void jtag_profile_add_usb_tx_wait(void)
     }
 }
 
+void jtag_profile_add_usb_rx_batch(uint32_t bytes)
+{
+    if (profile.enabled) {
+        profile.usb_rx_read_calls++;
+        profile.usb_rx_bytes += bytes;
+        if (bytes > profile.usb_rx_max_batch) {
+            profile.usb_rx_max_batch = bytes;
+        }
+    }
+}
+
+void jtag_profile_add_usb_tx_batch(uint32_t bytes)
+{
+    if (profile.enabled) {
+        profile.usb_tx_write_calls++;
+        profile.usb_tx_bytes += bytes;
+        if (bytes > profile.usb_tx_max_batch) {
+            profile.usb_tx_max_batch = bytes;
+        }
+    }
+}
+
+void jtag_profile_add_usb_tx_flush(void)
+{
+    if (profile.enabled) {
+        profile.usb_tx_flush_calls++;
+    }
+}
+
 void jtag_profile_finish_shift(bool success,
                                uint64_t request_parse_us,
                                uint64_t response_queue_us,
@@ -252,6 +288,13 @@ size_t jtag_profile_format(char *buffer, size_t buffer_size)
     append_text(buffer, buffer_size, &offset, "  pio_recoveries=%lu\r\n", (unsigned long)profile.pio_recoveries);
     append_text(buffer, buffer_size, &offset, "  usb_rx_incomplete_waits=%lu\r\n", (unsigned long)profile.usb_rx_waits);
     append_text(buffer, buffer_size, &offset, "  usb_tx_space_waits=%lu\r\n", (unsigned long)profile.usb_tx_waits);
+    append_text(buffer, buffer_size, &offset, "  usb_rx_read_calls=%lu\r\n", (unsigned long)profile.usb_rx_read_calls);
+    append_text(buffer, buffer_size, &offset, "  usb_rx_bytes=%llu\r\n", (unsigned long long)profile.usb_rx_bytes);
+    append_text(buffer, buffer_size, &offset, "  usb_rx_max_batch=%lu\r\n", (unsigned long)profile.usb_rx_max_batch);
+    append_text(buffer, buffer_size, &offset, "  usb_tx_write_calls=%lu\r\n", (unsigned long)profile.usb_tx_write_calls);
+    append_text(buffer, buffer_size, &offset, "  usb_tx_bytes=%llu\r\n", (unsigned long long)profile.usb_tx_bytes);
+    append_text(buffer, buffer_size, &offset, "  usb_tx_max_batch=%lu\r\n", (unsigned long)profile.usb_tx_max_batch);
+    append_text(buffer, buffer_size, &offset, "  usb_tx_flush_calls=%lu\r\n", (unsigned long)profile.usb_tx_flush_calls);
     append_text(buffer, buffer_size, &offset, "Timing stats are integer microseconds; profiling off skips per-stage time reads.\r\n");
     append_stat(buffer, buffer_size, &offset, "request_parse_us", &profile.request_parse);
     append_stat(buffer, buffer_size, &offset, "tx_prepare_us", &profile.tx_prepare);

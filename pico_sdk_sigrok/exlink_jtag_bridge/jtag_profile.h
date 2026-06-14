@@ -26,6 +26,9 @@ void jtag_profile_add_dma_timeout(void);
 void jtag_profile_add_pio_recovery(void);
 void jtag_profile_add_usb_rx_wait(void);
 void jtag_profile_add_usb_tx_wait(void);
+void jtag_profile_add_usb_rx_batch(uint32_t bytes);
+void jtag_profile_add_usb_tx_batch(uint32_t bytes);
+void jtag_profile_add_usb_tx_flush(void);
 void jtag_profile_finish_shift(bool success,
                                uint64_t request_parse_us,
                                uint64_t response_queue_us,

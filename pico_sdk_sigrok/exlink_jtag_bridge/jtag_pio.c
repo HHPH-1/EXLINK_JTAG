@@ -39,8 +39,16 @@
  * a 2048-bit chunk the static DMA staging RAM is:
  *   TX: (1 count word + 512 data words) * 4 = 2052 bytes
  *   RX: (2048 / 32 + 1) words * 4          = 260 bytes
+ *
+ * In Stage 5.6 performance mode the chunk is 8192 bits:
+ *   TX: (1 count word + 2048 data words) * 4 = 8196 bytes
+ *   RX: (8192 / 32 + 1) words * 4            = 1028 bytes
  */
+#if EXLINK_JTAG_USE_LARGE_DMA_CHUNK
+#define EXLINK_JTAG_DMA_CHUNK_BITS 8192u
+#else
 #define EXLINK_JTAG_DMA_CHUNK_BITS 2048u
+#endif
 #define EXLINK_JTAG_PIO_TX_WORDS_PER_CHUNK ((EXLINK_JTAG_DMA_CHUNK_BITS + 3u) / 4u)
 #define EXLINK_JTAG_PIO_TX_DMA_WORDS (1u + EXLINK_JTAG_PIO_TX_WORDS_PER_CHUNK)
 #define EXLINK_JTAG_PIO_RX_WORDS_PER_CHUNK ((EXLINK_JTAG_DMA_CHUNK_BITS / 32u) + 1u)
@@ -59,6 +67,9 @@ static uint32_t requested_frequency_hz = EXLINK_JTAG_PIO_DEFAULT_TCK_HZ;
 static uint32_t actual_frequency_hz = 0u;
 static uint32_t tx_dma_words[EXLINK_JTAG_PIO_TX_DMA_WORDS];
 static uint32_t rx_dma_words[EXLINK_JTAG_PIO_RX_WORDS_PER_CHUNK];
+static dma_channel_config tx_dma_config;
+static dma_channel_config rx_dma_config;
+static bool dma_configs_initialized = false;
 static uint16_t exlink_jtag_instructions[EXLINK_JTAG_PIO_PROGRAM_LENGTH];
 static pio_program_t exlink_jtag_program = {
     .instructions = exlink_jtag_instructions,
@@ -67,6 +78,22 @@ static pio_program_t exlink_jtag_program = {
     .pio_version = 0,
 };
 static bool instructions_initialized = false;
+
+static void jtag_pio_configure_dma_channels(void);
+
+static const uint32_t jtag_tx_tms_lut[16] = {
+    0x00000000u, 0x00000011u, 0x00001100u, 0x00001111u,
+    0x00110000u, 0x00110011u, 0x00111100u, 0x00111111u,
+    0x11000000u, 0x11000011u, 0x11001100u, 0x11001111u,
+    0x11110000u, 0x11110011u, 0x11111100u, 0x11111111u,
+};
+
+static const uint32_t jtag_tx_tdi_lut[16] = {
+    0x00000000u, 0x00000088u, 0x00008800u, 0x00008888u,
+    0x00880000u, 0x00880088u, 0x00888800u, 0x00888888u,
+    0x88000000u, 0x88000088u, 0x88008800u, 0x88008888u,
+    0x88880000u, 0x88880088u, 0x88888800u, 0x88888888u,
+};
 
 static void jtag_pio_init_program_instructions(void)
 {
@@ -100,6 +127,14 @@ static void set_packed_bit(uint8_t *buffer, uint32_t bit_index, uint8_t value)
     }
 }
 
+static void put_u32_le(uint8_t *buffer, uint32_t value)
+{
+    buffer[0] = (uint8_t)(value & 0xffu);
+    buffer[1] = (uint8_t)((value >> 8) & 0xffu);
+    buffer[2] = (uint8_t)((value >> 16) & 0xffu);
+    buffer[3] = (uint8_t)((value >> 24) & 0xffu);
+}
+
 static void pio_drive_idle(uint32_t tms)
 {
     const uint32_t output_mask = (1u << EXLINK_JTAG_TMS_GPIO) |
@@ -109,10 +144,10 @@ static void pio_drive_idle(uint32_t tms)
     pio_sm_set_pins_with_mask(pio, (uint)sm, output_value, output_mask);
 }
 
-static uint32_t jtag_pio_pack_tx_chunk(const uint8_t *tms_bits,
-                                       const uint8_t *tdi_bits,
-                                       uint32_t source_bit_offset,
-                                       uint32_t bit_count)
+static uint32_t jtag_pio_pack_tx_chunk_reference(const uint8_t *tms_bits,
+                                                 const uint8_t *tdi_bits,
+                                                 uint32_t source_bit_offset,
+                                                 uint32_t bit_count)
 {
     const uint32_t tx_word_count = (bit_count + 3u) / 4u;
 
@@ -138,9 +173,72 @@ static uint32_t jtag_pio_pack_tx_chunk(const uint8_t *tms_bits,
     return tx_word_count + 1u;
 }
 
-static void jtag_pio_unpack_rx_chunk(uint32_t bit_count,
-                                     uint8_t *tdo_bits,
-                                     uint32_t target_bit_offset)
+static uint32_t jtag_pio_pack_tx_chunk_fast(const uint8_t *tms_bits,
+                                            const uint8_t *tdi_bits,
+                                            uint32_t source_bit_offset,
+                                            uint32_t bit_count)
+{
+    if ((source_bit_offset & 7u) != 0u) {
+        return jtag_pio_pack_tx_chunk_reference(tms_bits, tdi_bits, source_bit_offset, bit_count);
+    }
+
+    const uint32_t tx_word_count = (bit_count + 3u) / 4u;
+    if (tx_word_count > EXLINK_JTAG_PIO_TX_WORDS_PER_CHUNK) {
+        return 0u;
+    }
+
+    memset(tx_dma_words, 0, (tx_word_count + 1u) * sizeof(tx_dma_words[0]));
+    tx_dma_words[0] = bit_count - 1u;
+
+    const uint32_t source_byte_offset = source_bit_offset >> 3;
+    const uint32_t full_groups = bit_count >> 2;
+    for (uint32_t group = 0; group < full_groups; ++group) {
+        const uint32_t bit_in_byte = (group & 1u) ? 4u : 0u;
+        const uint32_t byte_index = source_byte_offset + (group >> 1);
+        const uint32_t tms_nibble = (tms_bits[byte_index] >> bit_in_byte) & 0x0fu;
+        const uint32_t tdi_nibble = (tdi_bits[byte_index] >> bit_in_byte) & 0x0fu;
+
+        tx_dma_words[1u + group] = 0x20202020u |
+                                   jtag_tx_tms_lut[tms_nibble] |
+                                   jtag_tx_tdi_lut[tdi_nibble];
+    }
+
+    const uint32_t tail_bits = bit_count & 3u;
+    if (tail_bits != 0u) {
+        uint32_t tail_word = 0u;
+        const uint32_t tail_base = full_groups << 2;
+        for (uint32_t bit = 0; bit < tail_bits; ++bit) {
+            const uint32_t source_bit = source_bit_offset + tail_base + bit;
+            const uint32_t tms = get_packed_bit(tms_bits, source_bit);
+            const uint32_t tdi = get_packed_bit(tdi_bits, source_bit);
+            const uint32_t low_nibble = (tms << 0) | (tdi << 3);
+            const uint32_t high_nibble = low_nibble | (1u << 1);
+            const uint32_t shift = bit * 8u;
+
+            tail_word |= low_nibble << shift;
+            tail_word |= high_nibble << (shift + 4u);
+        }
+        tx_dma_words[1u + full_groups] = tail_word;
+    }
+
+    return tx_word_count + 1u;
+}
+
+static uint32_t jtag_pio_pack_tx_chunk(const uint8_t *tms_bits,
+                                       const uint8_t *tdi_bits,
+                                       uint32_t source_bit_offset,
+                                       uint32_t bit_count)
+{
+#if EXLINK_JTAG_USE_FAST_TX_PACK
+    return jtag_pio_pack_tx_chunk_fast(tms_bits, tdi_bits, source_bit_offset, bit_count);
+#else
+    return jtag_pio_pack_tx_chunk_reference(tms_bits, tdi_bits, source_bit_offset, bit_count);
+#endif
+}
+
+static void jtag_pio_unpack_rx_chunk_reference(uint32_t bit_count,
+                                               uint8_t *tdo_bits,
+                                               uint32_t target_bit_offset)
 {
     for (uint32_t bit = 0; bit < bit_count; ++bit) {
         const uint32_t word_index = bit / 32u;
@@ -155,6 +253,45 @@ static void jtag_pio_unpack_rx_chunk(uint32_t bit_count,
                        target_bit_offset + bit,
                        (uint8_t)((rx_dma_words[word_index] >> rx_bit) & 1u));
     }
+}
+
+static void jtag_pio_unpack_rx_chunk_fast(uint32_t bit_count,
+                                          uint8_t *tdo_bits,
+                                          uint32_t target_bit_offset)
+{
+    if ((target_bit_offset & 7u) != 0u) {
+        jtag_pio_unpack_rx_chunk_reference(bit_count, tdo_bits, target_bit_offset);
+        return;
+    }
+
+    const uint32_t target_byte_offset = target_bit_offset >> 3;
+    const uint32_t full_words = bit_count >> 5;
+    for (uint32_t word = 0; word < full_words; ++word) {
+        put_u32_le(&tdo_bits[target_byte_offset + (word << 2)], rx_dma_words[word]);
+    }
+
+    const uint32_t remaining_bits = bit_count & 31u;
+    if (remaining_bits != 0u) {
+        const uint32_t rx_word = rx_dma_words[full_words];
+        const uint32_t valid_base = 32u - remaining_bits;
+        const uint32_t target_base = target_bit_offset + (full_words << 5);
+        for (uint32_t bit = 0; bit < remaining_bits; ++bit) {
+            set_packed_bit(tdo_bits,
+                           target_base + bit,
+                           (uint8_t)((rx_word >> (valid_base + bit)) & 1u));
+        }
+    }
+}
+
+static void jtag_pio_unpack_rx_chunk(uint32_t bit_count,
+                                     uint8_t *tdo_bits,
+                                     uint32_t target_bit_offset)
+{
+#if EXLINK_JTAG_USE_FAST_RX_PACK
+    jtag_pio_unpack_rx_chunk_fast(bit_count, tdo_bits, target_bit_offset);
+#else
+    jtag_pio_unpack_rx_chunk_reference(bit_count, tdo_bits, target_bit_offset);
+#endif
 }
 
 static void jtag_pio_clear_irqs(void)
@@ -184,6 +321,25 @@ static void jtag_pio_recover_after_error(void)
     pio_sm_restart(pio, (uint)sm);
     jtag_pio_clear_irqs();
     pio_drive_idle(0u);
+    if (tx_dma_channel >= 0 && rx_dma_channel >= 0) {
+        jtag_pio_configure_dma_channels();
+    }
+}
+
+static void jtag_pio_begin_logical_shift(void)
+{
+    jtag_pio_abort_dma_if_busy();
+    pio_sm_set_enabled(pio, (uint)sm, false);
+    pio_sm_clear_fifos(pio, (uint)sm);
+    pio_sm_restart(pio, (uint)sm);
+    jtag_pio_clear_irqs();
+    pio_drive_idle(1u);
+}
+
+static void jtag_pio_finish_logical_shift(void)
+{
+    pio_sm_set_enabled(pio, (uint)sm, false);
+    pio_drive_idle(0u);
 }
 
 static bool jtag_pio_claim_dma_channels(void)
@@ -205,6 +361,23 @@ static bool jtag_pio_claim_dma_channels(void)
     }
 
     return true;
+}
+
+static void jtag_pio_configure_dma_channels(void)
+{
+    tx_dma_config = dma_channel_get_default_config((uint)tx_dma_channel);
+    channel_config_set_transfer_data_size(&tx_dma_config, DMA_SIZE_32);
+    channel_config_set_read_increment(&tx_dma_config, true);
+    channel_config_set_write_increment(&tx_dma_config, false);
+    channel_config_set_dreq(&tx_dma_config, pio_get_dreq(pio, (uint)sm, true));
+
+    rx_dma_config = dma_channel_get_default_config((uint)rx_dma_channel);
+    channel_config_set_transfer_data_size(&rx_dma_config, DMA_SIZE_32);
+    channel_config_set_read_increment(&rx_dma_config, false);
+    channel_config_set_write_increment(&rx_dma_config, true);
+    channel_config_set_dreq(&rx_dma_config, pio_get_dreq(pio, (uint)sm, false));
+
+    dma_configs_initialized = true;
 }
 
 static void jtag_pio_configure_sm(float divider)
@@ -310,6 +483,7 @@ bool jtag_pio_reconfigure(void)
     pio_sm_clear_fifos(pio, (uint)sm);
     pio_sm_restart(pio, (uint)sm);
     jtag_pio_clear_irqs();
+    jtag_pio_configure_dma_channels();
     return true;
 }
 
@@ -387,34 +561,24 @@ static bool jtag_pio_shift_dma_chunk(const uint8_t *tms_bits,
         jtag_profile_add_dma_chunk();
     }
 
-    jtag_pio_abort_dma_if_busy();
-    pio_sm_set_enabled(pio, (uint)sm, false);
-    pio_sm_clear_fifos(pio, (uint)sm);
-    pio_sm_restart(pio, (uint)sm);
-    jtag_pio_clear_irqs();
-    pio_drive_idle(1u);
-
-    dma_channel_config rx_config = dma_channel_get_default_config((uint)rx_dma_channel);
-    channel_config_set_transfer_data_size(&rx_config, DMA_SIZE_32);
-    channel_config_set_read_increment(&rx_config, false);
-    channel_config_set_write_increment(&rx_config, true);
-    channel_config_set_dreq(&rx_config, pio_get_dreq(pio, (uint)sm, false));
+#if EXLINK_JTAG_USE_REDUCED_CHUNK_RESET
+    if (!dma_configs_initialized) {
+        jtag_pio_configure_dma_channels();
+    }
+#else
+    jtag_pio_begin_logical_shift();
+    jtag_pio_configure_dma_channels();
+#endif
 
     dma_channel_configure((uint)rx_dma_channel,
-                          &rx_config,
+                          &rx_dma_config,
                           rx_dma_words,
                           &pio->rxf[sm],
                           rx_transfer_count,
                           true);
 
-    dma_channel_config tx_config = dma_channel_get_default_config((uint)tx_dma_channel);
-    channel_config_set_transfer_data_size(&tx_config, DMA_SIZE_32);
-    channel_config_set_read_increment(&tx_config, true);
-    channel_config_set_write_increment(&tx_config, false);
-    channel_config_set_dreq(&tx_config, pio_get_dreq(pio, (uint)sm, true));
-
     dma_channel_configure((uint)tx_dma_channel,
-                          &tx_config,
+                          &tx_dma_config,
                           &pio->txf[sm],
                           tx_dma_words,
                           tx_transfer_count,
@@ -436,7 +600,9 @@ static bool jtag_pio_shift_dma_chunk(const uint8_t *tms_bits,
     }
 
     pio_sm_set_enabled(pio, (uint)sm, false);
+#if !EXLINK_JTAG_USE_REDUCED_CHUNK_RESET
     pio_drive_idle(0u);
+#endif
 
     if (profiling) {
         jtag_profile_add_dma_pio_us(jtag_profile_now_us() - stage_start_us);
@@ -472,6 +638,10 @@ bool jtag_pio_shift_bits(uint32_t bit_count,
 
     memset(tdo_bits, 0, (bit_count + 7u) / 8u);
 
+#if EXLINK_JTAG_USE_REDUCED_CHUNK_RESET
+    jtag_pio_begin_logical_shift();
+#endif
+
     uint32_t bit_offset = 0u;
     while (bit_offset < bit_count) {
         const uint32_t remaining = bit_count - bit_offset;
@@ -489,6 +659,10 @@ bool jtag_pio_shift_bits(uint32_t bit_count,
 
         bit_offset += chunk_bits;
     }
+
+#if EXLINK_JTAG_USE_REDUCED_CHUNK_RESET
+    jtag_pio_finish_logical_shift();
+#endif
 
     return true;
 }

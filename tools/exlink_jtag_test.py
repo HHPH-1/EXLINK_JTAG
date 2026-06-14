@@ -16,7 +16,7 @@ except ImportError as exc:  # pragma: no cover - host dependency hint
     raise SystemExit("pyserial is required: py -m pip install pyserial") from exc
 
 
-MAX_SHIFT_BITS = 32768
+MAX_SHIFT_BITS = 131072
 ENGINE_NAMES = {
     0: "bitbang",
     1: "pio",
@@ -307,6 +307,9 @@ def cmd_engine(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
 
 
 def cmd_loopback(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
+    _active, _supported, max_shift_bits = bridge.capabilities()
+    if args.bits > max_shift_bits:
+        raise BridgeError(f"requested {args.bits} bits exceeds firmware maximum {max_shift_bits}")
     rng = random.Random(args.seed)
     tdi = random_payload(args.bits, rng)
     run_loopback_payload(bridge, args.bits, tdi)
@@ -317,14 +320,18 @@ def cmd_loopback(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
 
 
 def cmd_boundary_test(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
+    _active, _supported, max_shift_bits = bridge.capabilities()
     lengths = [1, 2, 7, 8, 9, 15, 16, 17, 31, 32, 33, 63, 64, 65,
                127, 128, 129, 255, 256, 257, 511, 512, 513,
                1023, 1024, 1025, 2047, 2048, 2049,
                4095, 4096, 4097, 8191, 8192, 8193,
-               16383, 16384, 16385, 32767, 32768]
+               16383, 16384, 16385, 32767, 32768, 32769,
+               65535, 65536, 65537, 131071, 131072]
     patterns = ["zero", "one", "random"]
 
     for bit_count in lengths:
+        if bit_count > max_shift_bits:
+            continue
         for pattern in patterns:
             payload = make_pattern(bit_count, pattern, args.seed + bit_count)
             run_loopback_payload(bridge, bit_count, payload)
@@ -336,7 +343,9 @@ def cmd_boundary_test(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> Non
 
 def cmd_stress(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
-    active, supported, _max_shift_bits = bridge.capabilities()
+    active, supported, max_shift_bits = bridge.capabilities()
+    if args.bits > max_shift_bits:
+        raise BridgeError(f"requested {args.bits} bits exceeds firmware maximum {max_shift_bits}")
     start = time.perf_counter()
     latencies = []
 
@@ -365,11 +374,13 @@ def cmd_stress(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
 
 def cmd_benchmark(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
     rng = random.Random(args.seed)
-    active, supported, _max_shift_bits = bridge.capabilities()
-    lengths = [128, 512, 4096, 8192, 16384, 32768]
+    active, supported, max_shift_bits = bridge.capabilities()
+    lengths = [128, 512, 4096, 8192, 16384, 32768, 65536, 131072]
     print(f"Engine: {engine_name(active)}")
     print(f"DMA: {'yes' if supported & (1 << 2) else 'no'}")
     for bit_count in lengths:
+        if bit_count > max_shift_bits:
+            continue
         payloads = [random_payload(bit_count, rng) for _ in range(args.count)]
         start = time.perf_counter()
         for payload in payloads:

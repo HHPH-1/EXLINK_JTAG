@@ -1,0 +1,16 @@
+.program exlink_jtag
+
+.wrap_target
+    pull block
+    mov x, osr
+    out null, 32
+    pull block
+loop:
+    out pins, 4
+    nop
+    out pins, 4
+    in pins, 1
+    jmp x-- loop
+    set pins, 0
+    push block
+.wrap

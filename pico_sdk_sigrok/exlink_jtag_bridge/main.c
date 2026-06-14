@@ -1,4 +1,4 @@
-#include "jtag_gpio.h"
+#include "jtag_engine.h"
 #include "jtag_protocol.h"
 
 #include "exlink_rp2040.h"
@@ -13,7 +13,7 @@ _Static_assert(PICO_FLASH_SIZE_BYTES == EXLINK_FLASH_SIZE_BYTES,
 int main(void)
 {
     stdio_init_all();
-    jtag_gpio_init();
+    (void)jtag_engine_init();
     jtag_protocol_init();
 
     while (true) {

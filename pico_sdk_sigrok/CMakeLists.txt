@@ -62,7 +62,9 @@ target_link_libraries(
 if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
     add_executable(exlink_jtag_bridge
         exlink_jtag_bridge/main.c
+        exlink_jtag_bridge/jtag_engine.c
         exlink_jtag_bridge/jtag_gpio.c
+        exlink_jtag_bridge/jtag_pio.c
         exlink_jtag_bridge/jtag_protocol.c
         exlink_jtag_bridge/usb_cdc_transport.c
     )
@@ -81,7 +83,9 @@ if(SIGROK_BOARD_EXLINK AND EXLINK_BUILD_JTAG_BRIDGE)
     target_link_libraries(exlink_jtag_bridge
         pico_stdlib
         pico_stdio_usb
+        hardware_clocks
         hardware_gpio
+        hardware_pio
         hardware_sync
     )
 

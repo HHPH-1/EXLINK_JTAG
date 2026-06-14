@@ -1,6 +1,6 @@
 #include "jtag_protocol.h"
 
-#include "jtag_gpio.h"
+#include "jtag_engine.h"
 #include "usb_cdc_transport.h"
 #include "tusb.h"
 
@@ -15,6 +15,11 @@
 #define RESP_STATUS_BAD_LEN   1u
 #define RESP_STATUS_TIMEOUT   2u
 #define RESP_STATUS_EXEC_FAIL 3u
+
+#define ENGINE_STATUS_OK          0u
+#define ENGINE_STATUS_BAD_PARAM   1u
+#define ENGINE_STATUS_INIT_FAIL   2u
+#define ENGINE_STATUS_SWITCH_FAIL 3u
 
 #define ERROR_INVALID_COMMAND 1u
 #define ERROR_TIMEOUT         2u
@@ -69,6 +74,15 @@ static bool write_shift_status(uint8_t status, uint32_t bit_count, bool include_
     return true;
 }
 
+static bool write_engine_status(uint8_t status)
+{
+    uint8_t response[3];
+    response[0] = 'm';
+    response[1] = status;
+    response[2] = (uint8_t)jtag_engine_get_active();
+    return usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
+}
+
 static void handle_info(void)
 {
     static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.2";
@@ -83,7 +97,7 @@ static void handle_info(void)
 static void handle_reset(void)
 {
     uint8_t response[2] = {'t', RESP_STATUS_OK};
-    jtag_tap_reset();
+    jtag_engine_tap_reset();
     (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
 }
 
@@ -108,7 +122,7 @@ static void handle_shift(void)
         return;
     }
 
-    if (!jtag_shift_bits(bit_count, tms_buffer, tdi_buffer, tdo_buffer)) {
+    if (!jtag_engine_shift_bits(bit_count, tms_buffer, tdi_buffer, tdo_buffer)) {
         (void)write_shift_status(RESP_STATUS_EXEC_FAIL, bit_count, false);
         return;
     }
@@ -129,15 +143,52 @@ static void handle_clock(void)
     uint32_t requested = get_u32_le(value_buffer);
     uint8_t status = RESP_STATUS_OK;
 
-    if ((requested < JTAG_MIN_HALF_PERIOD_US) || (requested > JTAG_MAX_HALF_PERIOD_US)) {
+    if ((requested < JTAG_ENGINE_MIN_HALF_PERIOD_US) ||
+        (requested > JTAG_ENGINE_MAX_HALF_PERIOD_US)) {
         status = RESP_STATUS_BAD_LEN;
     } else {
-        jtag_set_half_period_us(requested);
+        jtag_engine_set_half_period_us(requested);
     }
 
     response[0] = 'k';
     response[1] = status;
-    put_u32_le(&response[2], jtag_get_half_period_us());
+    put_u32_le(&response[2], jtag_engine_get_half_period_us());
+    (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
+}
+
+static void handle_engine_select(void)
+{
+    uint8_t engine = 0u;
+    uint8_t status = ENGINE_STATUS_OK;
+
+    if (!usb_cdc_read_exact(&engine, sizeof(engine), USB_IO_TIMEOUT_MS)) {
+        (void)write_error(ERROR_TIMEOUT);
+        return;
+    }
+
+    if (engine > (uint8_t)JTAG_ENGINE_PIO) {
+        (void)write_engine_status(ENGINE_STATUS_BAD_PARAM);
+        return;
+    }
+
+    if (!jtag_engine_select((JtagEngineType_t)engine)) {
+        status = (engine == (uint8_t)JTAG_ENGINE_PIO) ?
+                 ENGINE_STATUS_INIT_FAIL :
+                 ENGINE_STATUS_SWITCH_FAIL;
+    }
+
+    (void)write_engine_status(status);
+}
+
+static void handle_capabilities(void)
+{
+    uint8_t response[8];
+    response[0] = 'q';
+    response[1] = RESP_STATUS_OK;
+    response[2] = (uint8_t)jtag_engine_get_active();
+    response[3] = jtag_engine_get_supported_flags();
+    put_u32_le(&response[4], EXLINK_JTAG_MAX_SHIFT_BITS);
+
     (void)usb_cdc_write_all(response, sizeof(response), USB_IO_TIMEOUT_MS);
 }
 
@@ -171,6 +222,12 @@ void jtag_protocol_task(void)
         break;
     case 'K':
         handle_clock();
+        break;
+    case 'M':
+        handle_engine_select();
+        break;
+    case 'Q':
+        handle_capabilities();
         break;
     default:
         (void)write_error(ERROR_INVALID_COMMAND);

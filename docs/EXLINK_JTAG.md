@@ -126,22 +126,22 @@ tools/
 
 # 四、实际硬件引脚
 
-必须使用 Exlink 原理图确认的映射：
+必须使用 Stage 3 更新后的 Exlink JTAG v0.2 映射。旧的 v0.1 映射不得作为默认接线继续使用：
 
 ```c
-#define EXLINK_JTAG_TCK_GPIO    2u   /* CHAN0，RP2040输出 */
-#define EXLINK_JTAG_TMS_GPIO    3u   /* CHAN1，RP2040输出 */
-#define EXLINK_JTAG_TDI_GPIO    4u   /* CHAN2，RP2040输出 */
-#define EXLINK_JTAG_TDO_GPIO    5u   /* CHAN3，RP2040输入 */
+#define EXLINK_JTAG_TMS_GPIO    2u   /* CHAN0，RP2040输出 */
+#define EXLINK_JTAG_TCK_GPIO    3u   /* CHAN1，RP2040输出 */
+#define EXLINK_JTAG_TDO_GPIO    4u   /* CHAN2，RP2040输入 */
+#define EXLINK_JTAG_TDI_GPIO    5u   /* CHAN3，RP2040输出 */
 ```
 
 物理接线：
 
 ```text
-Exlink CHAN0 / GPIO2 → 目标板 TCK
-Exlink CHAN1 / GPIO3 → 目标板 TMS
-Exlink CHAN2 / GPIO4 → 目标板 TDI
-Exlink CHAN3 / GPIO5 ← 目标板 TDO
+Exlink CHAN0 / GPIO2 → 目标板 TMS
+Exlink CHAN1 / GPIO3 → 目标板 TCK
+Exlink CHAN2 / GPIO4 ← 目标板 TDO
+Exlink CHAN3 / GPIO5 → 目标板 TDI
 Exlink GND            ↔ 目标板 GND
 ```
 
@@ -342,7 +342,7 @@ text[text_length]
 字符串：
 
 ```text
-EXLINK-RP2040-JTAG-BRIDGE v0.1
+EXLINK-RP2040-JTAG-BRIDGE v0.2
 ```
 
 ## 7.2 TAP复位命令
@@ -599,7 +599,7 @@ python exlink_jtag_test.py --port COM8 clock --half-period-us 5
 发送 `I`，验证返回：
 
 ```text
-EXLINK-RP2040-JTAG-BRIDGE v0.1
+EXLINK-RP2040-JTAG-BRIDGE v0.2
 ```
 
 ## 11.2 loopback
@@ -607,7 +607,7 @@ EXLINK-RP2040-JTAG-BRIDGE v0.1
 测试前用户临时短接：
 
 ```text
-CHAN2 / TDI → CHAN3 / TDO
+CHAN3 / GPIO5 / TDI → CHAN2 / GPIO4 / TDO
 ```
 
 不接目标板。
@@ -819,7 +819,7 @@ python tools/exlink_jtag_test.py --port COMx info
 临时连接：
 
 ```text
-CHAN2 → CHAN3
+CHAN3 / GPIO5 / TDI → CHAN2 / GPIO4 / TDO
 ```
 
 运行：
@@ -841,9 +841,9 @@ PASS
 观察：
 
 ```text
-CHAN0 = TCK
-CHAN1 = TMS
-CHAN2 = TDI
+CHAN0 = TMS
+CHAN1 = TCK
+CHAN3 = TDI
 ```
 
 发送TAP reset和shift命令，确认：
@@ -859,10 +859,10 @@ CHAN2 = TDI
 仅连接：
 
 ```text
-CHAN0 → TCK
-CHAN1 → TMS
-CHAN2 → TDI
-CHAN3 ← TDO
+CHAN0 / GPIO2 → TMS
+CHAN1 / GPIO3 → TCK
+CHAN2 / GPIO4 ← TDO
+CHAN3 / GPIO5 → TDI
 GND    ↔ GND
 ```
 

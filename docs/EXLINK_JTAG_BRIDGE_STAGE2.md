@@ -6,12 +6,15 @@ tools for low-level CDC testing and Vivado XVC access. The existing
 
 ## GPIO Mapping
 
+Stage 3 changes the JTAG wiring. The default and only current wiring shown in
+this guide is the v0.2 pin map:
+
 | Exlink channel | RP2040 GPIO | JTAG signal |
 | --- | ---: | --- |
-| CHAN0 | GPIO2 | TCK |
-| CHAN1 | GPIO3 | TMS |
-| CHAN2 | GPIO4 | TDI |
-| CHAN3 | GPIO5 | TDO |
+| CHAN0 | GPIO2 | TMS |
+| CHAN1 | GPIO3 | TCK |
+| CHAN2 | GPIO4 | TDO |
+| CHAN3 | GPIO5 | TDI |
 | GND | GND | GND |
 
 Do not use GPIO0/GPIO1 or the RP2040 SWD pins for target JTAG.
@@ -29,7 +32,7 @@ powered that way.
 All multi-byte integers are little-endian.
 
 - `I` returns `i`, `uint16 text_length`, and the ASCII text
-  `EXLINK-RP2040-JTAG-BRIDGE v0.1`.
+  `EXLINK-RP2040-JTAG-BRIDGE v0.2`.
 - `T` runs TAP reset and returns `t`, `uint8 status`.
 - `S`, `uint32 bit_count`, TMS bytes, TDI bytes shifts up to 4096 bits and
   returns `s`, `uint8 status`, `uint32 bit_count`, and TDO bytes on success.
@@ -78,11 +81,11 @@ python tools/exlink_jtag_test.py --port COMx loopback
 python tools/exlink_jtag_test.py --port COMx scan --bits 128
 ```
 
-For loopback, temporarily connect CHAN2/TDI to CHAN3/TDO with no target
+For loopback, temporarily connect CHAN3/TDI to CHAN2/TDO with no target
 connected. Remove the jumper after the test.
 
 For Zynq scan, first confirm the target JTAG bank is 3.3 V compatible and wire
-only CHAN0/TCK, CHAN1/TMS, CHAN2/TDI, CHAN3/TDO, and GND. The scan command
+only CHAN0/TMS, CHAN1/TCK, CHAN2/TDO, CHAN3/TDI, and GND. The scan command
 prints raw TDO bytes, the LSB-first bitstream, 32-bit words, and basic IDCODE
 candidates. A candidate is not proof of a complete Vivado connection.
 

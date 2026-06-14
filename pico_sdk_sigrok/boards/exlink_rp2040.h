@@ -26,13 +26,13 @@
 #define EXLINK_ADC_ROUND_ROBIN_MASK    (1u << EXLINK_ADC_INPUT)
 
 /*
- * Reserved for a future Vivado JTAG mode.
- * This build only implements the existing sigrok logic-analyzer firmware.
+ * Exlink JTAG v0.2 pin map:
+ * CHAN0/GPIO2=TMS, CHAN1/GPIO3=TCK, CHAN2/GPIO4=TDO, CHAN3/GPIO5=TDI.
  */
-#define EXLINK_JTAG_TCK_GPIO           EXLINK_LA_CH0_GPIO
-#define EXLINK_JTAG_TMS_GPIO           EXLINK_LA_CH1_GPIO
-#define EXLINK_JTAG_TDI_GPIO           EXLINK_LA_CH2_GPIO
-#define EXLINK_JTAG_TDO_GPIO           EXLINK_LA_CH3_GPIO
+#define EXLINK_JTAG_TMS_GPIO           EXLINK_LA_CH0_GPIO
+#define EXLINK_JTAG_TCK_GPIO           EXLINK_LA_CH1_GPIO
+#define EXLINK_JTAG_TDO_GPIO           EXLINK_LA_CH2_GPIO
+#define EXLINK_JTAG_TDI_GPIO           EXLINK_LA_CH3_GPIO
 
 _Static_assert(EXLINK_LA_CH0_GPIO == EXLINK_LA_GPIO_BASE,
                "CHAN0 must be the first PIO input GPIO");
@@ -40,5 +40,10 @@ _Static_assert(EXLINK_LA_CH0_GPIO == EXLINK_LA_GPIO_BASE,
 _Static_assert(EXLINK_LA_CH7_GPIO ==
                EXLINK_LA_GPIO_BASE + EXLINK_LA_CHANNEL_COUNT - 1u,
                "Logic analyzer GPIOs must be contiguous");
+
+_Static_assert(EXLINK_JTAG_TMS_GPIO == 2u, "JTAG TMS must be CHAN0/GPIO2");
+_Static_assert(EXLINK_JTAG_TCK_GPIO == 3u, "JTAG TCK must be CHAN1/GPIO3");
+_Static_assert(EXLINK_JTAG_TDO_GPIO == 4u, "JTAG TDO must be CHAN2/GPIO4");
+_Static_assert(EXLINK_JTAG_TDI_GPIO == 5u, "JTAG TDI must be CHAN3/GPIO5");
 
 #endif

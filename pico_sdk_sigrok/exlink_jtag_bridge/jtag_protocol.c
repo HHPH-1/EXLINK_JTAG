@@ -71,7 +71,7 @@ static bool write_shift_status(uint8_t status, uint32_t bit_count, bool include_
 
 static void handle_info(void)
 {
-    static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.1";
+    static const char info[] = "EXLINK-RP2040-JTAG-BRIDGE v0.2";
     uint8_t header[3];
     header[0] = 'i';
     put_u16_le(&header[1], (uint16_t)(sizeof(info) - 1u));

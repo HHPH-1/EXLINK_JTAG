@@ -144,7 +144,7 @@ def cmd_loopback(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
         raise BridgeError(f"loopback mismatch at {len(mismatches)} bit(s): {preview}")
 
     print("PASS: TDI->TDO loopback matched")
-    print("Remove the temporary CHAN2/TDI to CHAN3/TDO jumper before connecting a target.")
+    print("Remove the temporary CHAN3/TDI to CHAN2/TDO jumper before connecting a target.")
 
 
 def cmd_scan(bridge: ExlinkJtagBridge, args: argparse.Namespace) -> None:
